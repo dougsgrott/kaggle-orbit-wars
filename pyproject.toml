@@ -1,0 +1,14 @@
+[project]
+name = "orbit-wars"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "graphviz>=0.21",
+    "kaggle-environments==1.29.3",
+    "lizard>=1.22.2",
+    "pipdeptree>=2.35.3",
+    "pydeps>=3.0.6",
+    "radon>=6.0.1",
+]
