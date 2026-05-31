@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.claude/
+analysis/
+clean_scripts/
+converted_scripts/
+docs/
+kaggle_notebooks/
+wiki/
+CLAUDE.md
+COMPETITION_DATA.md
+CONTEXT.md
+PLAN.md
+orbit_wars_catalogue.csv
+pipeline.py
