@@ -44,10 +44,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SECTIONS: List[Tuple[str, Union[str, List[str]]]] = [
     ("src/utils.py", "ALL"),
     ("src/features.py", ["find_target_via_ray"]),
+    # roi_greedy supplies the shared helpers (SHIP_BUFFER, _field,
+    # _inbound_threats, defense_reserve); roi_greedy_predict is the DEFAULT brain
+    # and is flattened LAST so its `plan_turn` is the one the entry point calls
+    # (it shadows roi_greedy's identically-named `plan_turn`). Keep the DEFAULT
+    # brain's module last here when promoting a new brain.
     ("src/agents/roi_greedy.py", "ALL"),
+    ("src/agents/roi_greedy_predict.py", "ALL"),
 ]
 
-# The brain the entry point forwards to (must be defined by one of the sections).
+# The brain the entry point forwards to: the LAST-defined `plan_turn` above
+# (the DEFAULT brain).
 ENTRY_BODY = "plan_turn(obs, config)"
 
 # Imports we never carry into the flattened file.
