@@ -13,9 +13,10 @@ Our Orbit Wars entry. The corpus analysis lives upstream in [../wiki/inventory.m
 | [stats.py](stats.py) | `PhysicsStats` per-game instrumentation. | clean_scripts/orbit_wars_physics_helper_module.py |
 | [viz.py](viz.py) | Dark-theme matplotlib helpers + `draw_board(obs)`. | clean_scripts/orbit_wars_advanced_agent_target_1608_6.py |
 | [replay.py](replay.py) | Game-trace debugger: turn-by-turn replay of an `arena.record_episode` trace with fleet death-cause (combat/out-of-bounds/sun) + missed-**Shot** overlays. `python -m src.replay` → GIF + death summary. | (new — slice T1) |
-| [agent.py](agent.py) | Our entry point — currently a stub returning `[]`. | (none — write our own) |
-| [opponents/](opponents/) | 5 simple agents (`nearest_sniper`, `weakest_first`, `production_first`, `defender`, `random_play`) for eval. | clean_scripts/train_submit_v4 OPPONENT_CODES |
-| [tests/](tests/) | pytest tests for utils, arena, and replay. Pure tests need no `kaggle_environments`; the Arena integration tests skip without it. | (new) |
+| [agents/](agents/) | Our candidate **brains** — coexisting decision policies, each a pure `plan_turn(obs, config=None) → list[Shot]`, selected via a `REGISTRY` + `DEFAULT` ([ADR-0002](../docs/adr/0002-coexisting-agent-brains-registry.md)). First brain: `roi_greedy` (the v0 baseline). | (new — slice AG1) |
+| [agent.py](agent.py) | Single Kaggle entry point — currently a stub returning `[]`; AG2 wraps the `DEFAULT` brain from `agents/`. | (none — write our own) |
+| [opponents/](opponents/) | 5 simple agents (`nearest_sniper`, `weakest_first`, `production_first`, `defender`, `random_play`) for eval. Fixed yardsticks — the counterpart to our `agents/` brains. | clean_scripts/train_submit_v4 OPPONENT_CODES |
+| [tests/](tests/) | pytest tests for utils, arena, replay, and the brains. Pure tests need no `kaggle_environments`; the Arena integration tests skip without it. | (new) |
 
 ## Quick start
 
@@ -54,7 +55,7 @@ python -m src.replay
 ## How to evolve the agent
 
 1. Read [../wiki/strategies.md](../wiki/strategies.md) for the recommended start path.
-2. Replace the stub in [agent.py](agent.py) with our entry logic. All physics / aim calls go through [utils.py](utils.py); never re-derive `fleet_speed` or `aim_with_prediction` in agent code.
+2. Add or improve a **brain** in [agents/](agents/): a module exposing `plan_turn(obs, config=None) → list[Shot]`, registered in [agents/__init__.py](agents/__init__.py). Brains coexist so a weak strategy is one row in a comparison, not a dead end ([ADR-0002](../docs/adr/0002-coexisting-agent-brains-registry.md)); point `DEFAULT` at the current best. All physics / aim calls go through [utils.py](utils.py); never re-derive `fleet_speed` or `aim_with_prediction` in brain code. The thin [agent.py](agent.py) entry point wraps `DEFAULT` (wiring is AG2).
 3. Each iteration, run `evaluate_agent(...)` against `opponents.ALL` and append to `eval_log.csv` (passed via `csv_path=...`). Compare Wilson CIs across builds, not point estimates.
 4. When you start training the ML shot validator, mirror [features.py](features.py) and the gotchas in [../wiki/SKILL.md](../wiki/SKILL.md#3-known-gotchas--data-leakage-risks): game-level splits, `pos_rate` in 50–75%, 3-seed ensemble, AUC for best-epoch selection.
 
