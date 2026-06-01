@@ -17,26 +17,32 @@ Design notes
   ships in owned fleets at game end — exactly the interpreter's own scoring —
   and rank deterministically (higher score first; ties broken by lower player
   index). The raw env reward is still carried on each outcome for reference.
-- **Player-count-agnostic from the start.** `num_players` flows through to the
-  env; 2-player is exercised in slice A1, 4-player FFA lands in A2 through this
-  same interface.
+- **Player-count-agnostic.** `num_players` (2 or 4) flows through to the env;
+  the same interface plays 1v1 and 4P FFA — only the number changes.
+- **Fault-tolerant.** A callable agent that raises or blows its per-turn budget
+  is contained by a guard (the turn yields no Shots; the agent is skipped for
+  the rest of the game) rather than aborting the episode. File/builtin agents
+  can't be guarded in-process, so their faults are detected from the env's
+  per-step status instead. Either way a faulted agent is forced to **last
+  Placement**, and the episode still returns a full result.
 
 Public API
 ----------
     run_episode(agents, config=None)            -> EpisodeResult
     EpisodeConfig(num_players=2, seed=None, ...)
     EpisodeResult                               (.outcomes/.ranking/.winner/...)
-    AgentOutcome                                (.index/.placement/.score/...)
+    AgentOutcome                          (.index/.placement/.score/.faulted/...)
     score_board(planets, fleets, num_players)   -> list[int]      (pure)
-    compute_placements(scores)                  -> list[int]      (pure)
+    compute_placements(scores, faulted=None)    -> list[int]      (pure)
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Union
+from typing import Callable, Iterable, List, Optional, Sequence, Set, Union
 
 # Quiet kaggle_environments' noisy OpenSpiel import banner (dozens of INFO lines
 # emitted the first time the package is imported). We target only that logger so
@@ -74,6 +80,7 @@ class AgentOutcome:
     score: int  # final ship count: ships on owned planets + ships in owned fleets
     reward: Optional[float]  # raw env reward (+1 leader / -1 other / None on error)
     status: str  # final agent status reported by the env ("DONE", "ERROR", ...)
+    faulted: bool = False  # raised or timed out -> forced to last Placement
 
 
 @dataclass(frozen=True)
@@ -127,18 +134,96 @@ def score_board(planets, fleets, num_players: int) -> List[int]:
     return scores
 
 
-def compute_placements(scores: Sequence[int]) -> List[int]:
+def compute_placements(
+    scores: Sequence[int], faulted: Optional[Iterable[int]] = None
+) -> List[int]:
     """Deterministic 1-based Placement per player index from final scores.
 
     Higher score ranks first. Ties are broken by lower player index, so every
     agent gets a distinct Placement (1st, 2nd, ...) — this keeps downstream
     placement aggregation unambiguous and reproducible.
+
+    `faulted` is the set of player indices that raised or timed out; they are
+    ranked below every non-faulted agent regardless of score (so a crashed
+    agent that happened to keep ships still places last), ordered among
+    themselves by the same score-then-index rule.
     """
-    order = sorted(range(len(scores)), key=lambda i: (-scores[i], i))
+    faulted_set = set(faulted or ())
+    order = sorted(
+        range(len(scores)), key=lambda i: (i in faulted_set, -scores[i], i)
+    )
     placements = [0] * len(scores)
     for rank, i in enumerate(order):
         placements[i] = rank + 1
     return placements
+
+
+# ---------------------------------------------------------------------------
+# Fault isolation for callable agents.
+# ---------------------------------------------------------------------------
+
+
+class _GuardedAgent:
+    """Wrap a callable agent so a raised exception or an over-budget turn is
+    contained instead of aborting the episode.
+
+    On a fault the turn yields no Shots (`[]`), the agent is flagged
+    `faulted`, and every later turn short-circuits to `[]` — mirroring the
+    env's own "once errored, stop calling" behaviour. The Arena reads
+    `faulted` afterwards to force the agent to last Placement.
+
+    Timeout uses a worker thread (a plain Python callable can't be preempted):
+    if it doesn't finish within `timeout` seconds we abandon it (it's a daemon
+    thread, so it can't keep the process alive) and move on. Because we stop
+    calling a faulted agent, at most one such thread is ever spawned per agent.
+    `timeout=None` disables the time budget but still catches exceptions.
+    """
+
+    def __init__(self, fn: Callable, timeout: Optional[float] = None) -> None:
+        self._fn = fn
+        self._timeout = timeout
+        self.faulted = False
+
+    def __call__(self, observation, configuration=None):
+        if self.faulted:
+            return []
+        if self._timeout is None:
+            try:
+                return self._invoke(observation, configuration)
+            except BaseException:
+                self.faulted = True
+                return []
+        box: dict = {}
+
+        def target():
+            try:
+                box["ok"] = self._invoke(observation, configuration)
+            except BaseException as exc:  # noqa: BLE001 - contained on purpose
+                box["err"] = exc
+
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        worker.join(self._timeout)
+        if worker.is_alive() or "err" in box:
+            self.faulted = True
+            return []
+        return box.get("ok", [])
+
+    def _invoke(self, observation, configuration):
+        # Match the env's arity handling: pass (obs, config) truncated to the
+        # wrapped function's positional-arg count (some agents take obs only).
+        fn = self._fn
+        args = [observation, configuration]
+        if hasattr(fn, "__code__") and hasattr(fn.__code__, "co_argcount"):
+            args = args[: fn.__code__.co_argcount]
+        return fn(*args)
+
+
+def _guard(agent: Agent, timeout: Optional[float]) -> Optional[_GuardedAgent]:
+    """Wrap a callable agent in a guard; return None for file-path / builtin
+    agents (which run out-of-our-reach inside the env and are fault-detected
+    from the env's per-step status instead)."""
+    return _GuardedAgent(agent, timeout) if callable(agent) else None
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +242,11 @@ def run_episode(
     """
     if config is None:
         config = EpisodeConfig()
+    if config.num_players not in (2, 4):
+        raise ValueError(
+            f"num_players must be 2 or 4 (orbit_wars supports 1v1 and 4P FFA), "
+            f"got {config.num_players}"
+        )
     if len(agents) != config.num_players:
         raise ValueError(
             f"expected {config.num_players} agents, got {len(agents)}"
@@ -170,22 +260,52 @@ def run_episode(
         env_config["seed"] = config.seed
     if config.episode_steps is not None:
         env_config["episodeSteps"] = config.episode_steps
-    if config.act_timeout is not None:
-        env_config["actTimeout"] = config.act_timeout
+
+    # Wrap callable agents in a fault guard; pass file/builtin agents through
+    # unchanged (the env runs them and we read faults from its per-step status).
+    # `act_timeout` is the Arena's own per-turn budget, NOT the env's actTimeout:
+    # the env can't preempt an in-process callable (it only burns a 60s overage),
+    # so we enforce the budget ourselves in the guard.
+    guards = [_guard(a, config.act_timeout) for a in agents]
+    runnable = [g if g is not None else a for g, a in zip(guards, agents)]
 
     env = make("orbit_wars", configuration=env_config, debug=False)
-    env.run(list(agents))
+    env.run(runnable)
 
-    return _extract_result(env, config.num_players)
+    return _extract_result(env, config.num_players, guards)
 
 
-def _extract_result(env, num_players: int) -> EpisodeResult:
+# Env-reported statuses that mean an agent raised, timed out, or returned an
+# illegal action — used to detect faults of file/builtin agents we can't guard.
+_FAULT_STATUSES = frozenset({"ERROR", "TIMEOUT", "INVALID"})
+
+
+def _faulted_indices(env, guards: Sequence[Optional[_GuardedAgent]]) -> Set[int]:
+    """Player indices that faulted: guarded callables that flagged themselves,
+    plus any agent the env marked ERROR/TIMEOUT/INVALID at any step (the final
+    step is unreliable — the interpreter resets every status to DONE on
+    termination, so we scan the whole episode)."""
+    faulted: Set[int] = set()
+    for i, g in enumerate(guards):
+        if g is not None and g.faulted:
+            faulted.add(i)
+    for step in env.steps:
+        for i, agent_state in enumerate(step):
+            if agent_state.status in _FAULT_STATUSES:
+                faulted.add(i)
+    return faulted
+
+
+def _extract_result(
+    env, num_players: int, guards: Sequence[Optional[_GuardedAgent]]
+) -> EpisodeResult:
     """Turn a finished env into an EpisodeResult — the result-extraction half of
     the encapsulated seam."""
     last = env.steps[-1]
     obs = last[0].observation  # full board is shared across all agent slots
     scores = score_board(obs["planets"], obs["fleets"], num_players)
-    placements = compute_placements(scores)
+    faulted = _faulted_indices(env, guards)
+    placements = compute_placements(scores, faulted)
 
     outcomes = tuple(
         AgentOutcome(
@@ -194,6 +314,7 @@ def _extract_result(env, num_players: int) -> EpisodeResult:
             score=int(scores[i]),
             reward=last[i].reward,
             status=last[i].status,
+            faulted=i in faulted,
         )
         for i in range(num_players)
     )
@@ -207,23 +328,52 @@ def _extract_result(env, num_players: int) -> EpisodeResult:
 
 
 # ---------------------------------------------------------------------------
-# Demo: print the placements for one 2-player game.
+# Demo: 2-player, 4-player, and a crashing-stub episode.
 #   python -m src.arena
 # ---------------------------------------------------------------------------
 
 
+def _print_result(title: str, result: EpisodeResult, names: Sequence[str]) -> None:
+    medals = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}
+    print(f"\n{title} — seed {result.seed}, {result.num_steps} steps")
+    for o in sorted(result.outcomes, key=lambda o: o.placement):
+        flag = "  (faulted)" if o.faulted else ""
+        print(
+            f"  {medals[o.placement]}  {names[o.index]:<18} "
+            f"score={o.score:>6}  reward={o.reward}{flag}"
+        )
+    print(f"  Winner: {names[result.winner]}")
+
+
 def _demo() -> None:
     opp = Path(__file__).parent / "opponents"
-    agents = [str(opp / "weakest_first.py"), str(opp / "production_first.py")]
-    names = ["weakest_first", "production_first"]
+    p = lambda name: str(opp / f"{name}.py")  # noqa: E731
 
-    result = run_episode(agents, EpisodeConfig(num_players=2, seed=2026))
+    # 1) 2-player.
+    names2 = ["weakest_first", "production_first"]
+    r2 = run_episode(
+        [p("weakest_first"), p("production_first")],
+        EpisodeConfig(num_players=2, seed=2026),
+    )
+    _print_result("2-player (1v1)", r2, names2)
 
-    print(f"Orbit Wars episode — seed {result.seed}, {result.num_steps} steps")
-    for o in sorted(result.outcomes, key=lambda o: o.placement):
-        medal = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}[o.placement]
-        print(f"  {medal}  {names[o.index]:<18} score={o.score:>6}  reward={o.reward}")
-    print(f"Winner: {names[result.winner]}")
+    # 2) 4-player FFA — same interface, num_players=4.
+    names4 = ["weakest_first", "production_first", "nearest_sniper", "defender"]
+    r4 = run_episode(
+        [p(n) for n in names4], EpisodeConfig(num_players=4, seed=2026)
+    )
+    _print_result("4-player (FFA)", r4, names4)
+
+    # 3) Crashing stub — the episode still completes and returns placements,
+    #    with the crashing agent forced to last.
+    def boom(obs, config=None):
+        raise RuntimeError("agent crashed")
+
+    namesC = ["weakest_first", "boom(crashes)"]
+    rC = run_episode(
+        [p("weakest_first"), boom], EpisodeConfig(num_players=2, seed=2026)
+    )
+    _print_result("crashing stub", rC, namesC)
 
 
 if __name__ == "__main__":
