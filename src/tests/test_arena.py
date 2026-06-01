@@ -3,9 +3,13 @@
 Two layers:
   * Pure tests for the placement/score helpers — no kaggle_environments, so they
     run anywhere (same spirit as the utils tests).
-  * One integration-flavored test that plays a real 2-player episode through
-    `run_episode`; it is skipped if the Official env isn't installed.
+  * Integration-flavored tests that play real episodes through `run_episode`
+    (2P + 4P, reproducibility, and fault tolerance); skipped if the Official env
+    isn't installed.
 """
+
+import time
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +20,10 @@ from src.arena import (
     compute_placements,
     score_board,
 )
+
+
+def _opp(name: str) -> str:
+    return str(Path(__file__).resolve().parents[1] / "opponents" / f"{name}.py")
 
 
 # --- pure: score_board --------------------------------------------------------
@@ -60,6 +68,17 @@ def test_compute_placements_is_a_permutation():
     assert sorted(placements) == [1, 2, 3, 4]
 
 
+def test_compute_placements_forces_faulted_below_everyone():
+    # idx 0 has the top score but faulted -> it must place last.
+    assert compute_placements([10, 5, 8], faulted={0}) == [3, 2, 1]
+
+
+def test_compute_placements_orders_multiple_faulted_among_themselves():
+    # idx 0,1 faulted -> they take the bottom slots, ranked by score then index;
+    # idx 2,3 (clean) take the top slots.
+    assert compute_placements([1, 2, 3, 4], faulted={0, 1}) == [4, 3, 2, 1]
+
+
 # --- integration: a real episode through the seam -----------------------------
 
 
@@ -92,3 +111,89 @@ def test_run_episode_two_player_known_outcome():
     # do-nothing captures nothing and launches nothing -> zero final ships.
     assert result.score_of(0) > result.score_of(1)
     assert result.score_of(1) == 0
+
+
+def _boom(obs, config=None):
+    """An agent that always raises."""
+    raise RuntimeError("agent crashed")
+
+
+def _slow(obs, config=None):
+    """An agent that always blows a small per-turn budget."""
+    time.sleep(0.5)
+    return []
+
+
+def test_run_episode_rejects_unsupported_player_count():
+    # Validation happens before the env is touched, so no env is needed.
+    from src.arena import run_episode
+
+    with pytest.raises(ValueError):
+        run_episode([_do_nothing, _do_nothing, _do_nothing], EpisodeConfig(num_players=3))
+
+
+def test_run_episode_four_player_ffa():
+    pytest.importorskip("kaggle_environments")
+    from src.arena import run_episode
+
+    agents = [_opp(n) for n in
+              ("weakest_first", "production_first", "nearest_sniper", "defender")]
+    result = run_episode(agents, EpisodeConfig(num_players=4, seed=11, episode_steps=120))
+
+    assert result.num_players == 4
+    # Placements are a valid permutation of 1..4 via the same interface as 2P.
+    assert sorted(o.placement for o in result.outcomes) == [1, 2, 3, 4]
+    assert result.placement_of(result.winner) == 1
+    assert all(o.score >= 0 for o in result.outcomes)
+
+
+def test_run_episode_is_reproducible():
+    pytest.importorskip("kaggle_environments")
+    from src.arena import run_episode
+
+    agents = [_opp(n) for n in
+              ("weakest_first", "production_first", "nearest_sniper", "defender")]
+    cfg = EpisodeConfig(num_players=4, seed=99, episode_steps=120)
+
+    def signature(r):
+        return [(o.index, o.placement, o.score, o.reward, o.faulted) for o in r.outcomes]
+
+    r1 = run_episode(agents, cfg)
+    r2 = run_episode(agents, cfg)
+    assert signature(r1) == signature(r2)
+    assert r1.num_steps == r2.num_steps
+
+
+def test_run_episode_crashing_agent_placed_last():
+    pytest.importorskip("kaggle_environments")
+    from src.arena import run_episode
+
+    # slot 1 raises every turn; the episode must still complete and return a
+    # result, with the crashing agent forced to last Placement.
+    result = run_episode([_opp("weakest_first"), _boom], EpisodeConfig(num_players=2, seed=7))
+
+    assert isinstance(result, EpisodeResult)
+    assert result.outcomes[1].faulted is True
+    assert result.placement_of(1) == 2  # last in a 2-player game
+    assert result.outcomes[0].faulted is False
+    assert result.placement_of(0) == 1
+    assert result.winner == 0
+
+
+def test_run_episode_timeout_agent_placed_last():
+    pytest.importorskip("kaggle_environments")
+    from src.arena import run_episode
+
+    # slot 1 sleeps past the Arena's per-turn budget. It is flagged faulted and
+    # forced last even though sitting idle may leave it more ships than the
+    # winner. Marking it dead after the first timeout keeps the game fast.
+    t0 = time.time()
+    result = run_episode(
+        [_opp("weakest_first"), _slow],
+        EpisodeConfig(num_players=2, seed=7, episode_steps=40, act_timeout=0.15),
+    )
+    assert result.outcomes[1].faulted is True
+    assert result.placement_of(1) == 2
+    assert result.placement_of(0) == 1
+    # One ~0.15s timeout, then the agent is skipped — nowhere near 40 * 0.5s.
+    assert time.time() - t0 < 10
