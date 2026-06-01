@@ -29,8 +29,10 @@ Design notes
 Public API
 ----------
     run_episode(agents, config=None)            -> EpisodeResult
+    record_episode(agents, config=None)         -> EpisodeTrace   (per-turn record)
     EpisodeConfig(num_players=2, seed=None, ...)
     EpisodeResult                               (.outcomes/.ranking/.winner/...)
+    EpisodeTrace                                (.frames/.result/...)
     AgentOutcome                          (.index/.placement/.score/.faulted/...)
     score_board(planets, fleets, num_players)   -> list[int]      (pure)
     compute_placements(scores, faulted=None)    -> list[int]      (pure)
@@ -108,6 +110,32 @@ class EpisodeResult:
 
     def score_of(self, index: int) -> int:
         return self.outcomes[index].score
+
+
+@dataclass(frozen=True)
+class Frame:
+    """One recorded turn of an episode — the board after step `step`."""
+
+    step: int
+    planets: list  # [[id, owner, x, y, radius, ships, production], ...]
+    fleets: list  # [[id, owner, x, y, angle, from_planet_id, ships], ...]
+    actions: list  # per-player action submitted that turn (moves, or None)
+
+
+@dataclass(frozen=True)
+class EpisodeTrace:
+    """The full per-turn record of an episode: every `Frame` plus the final
+    `EpisodeResult`. Produced by `record_episode`, consumed by the game-trace
+    debugger; carries no `kaggle_environments` types so callers stay decoupled
+    from the env."""
+
+    frames: Sequence[Frame]
+    result: EpisodeResult
+    num_players: int
+    seed: Optional[int]
+
+    def __len__(self) -> int:
+        return len(self.frames)
 
 
 # ---------------------------------------------------------------------------
@@ -231,15 +259,11 @@ def _guard(agent: Agent, timeout: Optional[float]) -> Optional[_GuardedAgent]:
 # ---------------------------------------------------------------------------
 
 
-def run_episode(
-    agents: Sequence[Agent], config: Optional[EpisodeConfig] = None
-) -> EpisodeResult:
-    """Play one Orbit Wars episode and return a structured `EpisodeResult`.
-
-    `agents` is a list of agents (callables, .py paths, or builtin names), one
-    per player slot. `config` carries player count and seed. This is the only
-    function that touches the Official env.
-    """
+def _run_env(agents: Sequence[Agent], config: Optional[EpisodeConfig]):
+    """Validate, fault-guard the agents, and play one episode. Returns
+    `(env, guards, num_players)` — the shared core of `run_episode` (result
+    only) and `record_episode` (full trace). The only code that touches the
+    Official env."""
     if config is None:
         config = EpisodeConfig()
     if config.num_players not in (2, 4):
@@ -271,8 +295,45 @@ def run_episode(
 
     env = make("orbit_wars", configuration=env_config, debug=False)
     env.run(runnable)
+    return env, guards, config.num_players
 
-    return _extract_result(env, config.num_players, guards)
+
+def run_episode(
+    agents: Sequence[Agent], config: Optional[EpisodeConfig] = None
+) -> EpisodeResult:
+    """Play one Orbit Wars episode and return a structured `EpisodeResult`.
+
+    `agents` is a list of agents (callables, .py paths, or builtin names), one
+    per player slot. `config` carries player count and seed.
+    """
+    env, guards, num_players = _run_env(agents, config)
+    return _extract_result(env, num_players, guards)
+
+
+def record_episode(
+    agents: Sequence[Agent], config: Optional[EpisodeConfig] = None
+) -> "EpisodeTrace":
+    """Play one episode and return a full per-turn `EpisodeTrace` (plus the
+    `EpisodeResult`). The trace is the Arena's episode *record*: the game-trace
+    debugger (`src/replay.py`) renders it turn by turn without re-running any
+    agent. Like `run_episode`, this is the only path that touches the env."""
+    env, guards, num_players = _run_env(agents, config)
+    result = _extract_result(env, num_players, guards)
+    frames = tuple(
+        Frame(
+            step=t,
+            planets=[list(p) for p in step_states[0].observation["planets"]],
+            fleets=[list(f) for f in step_states[0].observation["fleets"]],
+            actions=[step_states[i].action for i in range(num_players)],
+        )
+        for t, step_states in enumerate(env.steps)
+    )
+    return EpisodeTrace(
+        frames=frames,
+        result=result,
+        num_players=num_players,
+        seed=result.seed,
+    )
 
 
 # Env-reported statuses that mean an agent raised, timed out, or returned an

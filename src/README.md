@@ -8,13 +8,14 @@ Our Orbit Wars entry. The corpus analysis lives upstream in [../wiki/inventory.m
 |---|---|---|
 | [utils.py](utils.py) | Definitive physics / geometry / aim solver / combat. All 5 inter-script divergences documented inline as `# Variants:` comments. | clean_scripts/orbit_wars_physics_helper_module.py (canonical, v7) + complete_game_mechanics + lb_1200 |
 | [features.py](features.py) | `encode_shot` (24-dim), `find_target_via_ray`, `label_outcome` for ML shot validation. | clean_scripts/train_submit_v4_ml_validator_topk2_tutorial.py (LB 899.7) |
-| [arena.py](arena.py) | `run_episode(agents, config)` → `EpisodeResult` (per-agent **Placement** + final score). Player-count-agnostic (2P + 4P), seeded, fault-tolerant. The stable swap-seam over the Official env ([ADR-0001](../docs/adr/0001-one-engine-transcribed-from-official-source.md)) — the **only** module that imports `kaggle_environments`. | (new — slices A1–A2) |
+| [arena.py](arena.py) | `run_episode(agents, config)` → `EpisodeResult` (per-agent **Placement** + final score); `record_episode` → `EpisodeTrace` (full per-turn record for the replay viewer). Player-count-agnostic (2P + 4P), seeded, fault-tolerant. The stable swap-seam over the Official env ([ADR-0001](../docs/adr/0001-one-engine-transcribed-from-official-source.md)) — the **only** module that imports `kaggle_environments`. | (new — slices A1–A2, T1) |
 | [eval.py](eval.py) | `run_match`, `wilson_ci`, `evaluate_agent` — multi-opponent win-rate harness with CIs and CSV logging. *(Still imports `kaggle_environments` directly; migrates onto `arena.run_episode` in slice E2.)* | clean_scripts/orbit_wars_validation_ml_robuste_harnais_eval.py (LB 835.6) |
 | [stats.py](stats.py) | `PhysicsStats` per-game instrumentation. | clean_scripts/orbit_wars_physics_helper_module.py |
 | [viz.py](viz.py) | Dark-theme matplotlib helpers + `draw_board(obs)`. | clean_scripts/orbit_wars_advanced_agent_target_1608_6.py |
+| [replay.py](replay.py) | Game-trace debugger: turn-by-turn replay of an `arena.record_episode` trace with fleet death-cause (combat/out-of-bounds/sun) + missed-**Shot** overlays. `python -m src.replay` → GIF + death summary. | (new — slice T1) |
 | [agent.py](agent.py) | Our entry point — currently a stub returning `[]`. | (none — write our own) |
 | [opponents/](opponents/) | 5 simple agents (`nearest_sniper`, `weakest_first`, `production_first`, `defender`, `random_play`) for eval. | clean_scripts/train_submit_v4 OPPONENT_CODES |
-| [tests/](tests/) | pytest sanity tests for utils. No `kaggle_environments` needed. | (new) |
+| [tests/](tests/) | pytest tests for utils, arena, and replay. Pure tests need no `kaggle_environments`; the Arena integration tests skip without it. | (new) |
 
 ## Quick start
 
@@ -45,6 +46,9 @@ evaluate_agent('src/agent.py',
                opponents.ALL,
                n_seeds=2, n_workers=2)
 "
+
+# 4. Visualize a game — writes analysis/replay_demo/episode.gif + a death summary
+python -m src.replay
 ```
 
 ## How to evolve the agent
