@@ -8,7 +8,16 @@ covered by the L1 smoke + the live sweep.)
 import csv
 
 import src.ladder as ladder_mod
-from src.ladder import _build_jobs, evaluate_ladder
+from src.ladder import _build_jobs, evaluate_ladder, ab_compare, _sign_test_p
+
+
+class _SerialPool:
+    """Drop-in for mp.Pool that runs jobs in-process, preserving order."""
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def imap(self, fn, jobs): return [fn(j) for j in jobs]
+    def imap_unordered(self, fn, jobs): return [fn(j) for j in jobs]
 
 
 _TINY_LADDER = {"panel": ["weakest_first"], "boss": ["bossX"]}
@@ -119,3 +128,66 @@ def test_evaluate_ladder_counts_faults(tmp_path, monkeypatch):
     # Agent faulted in every game -> all excluded, counted as faults, no rows.
     assert summary["faults"] == 3   # 2 one-v-one seats + 1 four-player
     assert summary["rows"] == []
+
+
+# --- ab_compare (paired boss A/B) -------------------------------------------
+
+
+def test_sign_test_p_known_values():
+    assert _sign_test_p(0, 0) == 1.0
+    assert abs(_sign_test_p(5, 5) - 0.0625) < 1e-9   # 2 * (1/32)
+    assert _sign_test_p(2, 4) == 1.0                  # symmetric split -> no evidence
+    assert abs(_sign_test_p(4, 4) - 0.125) < 1e-9     # 2 * (1/16)
+
+
+def test_ab_compare_paired_counts_and_independent_rates(tmp_path, monkeypatch):
+    # Deterministic stub of _play_job: brain "winA" places 1st iff seed-index < 3;
+    # "winB" iff seed-index < 5. Both face identical (seed, side) boards.
+    def fake_play(job):
+        agent_spec, opp_spec, opp_name, tier, fmt, seed, side, npl = job
+        s = seed - ladder_mod._SEED_BASE
+        won = (s < 3) if agent_spec[1] == "winA" else (s < 5)
+        return (opp_name, tier, fmt, 1 if won else 2, npl)
+
+    monkeypatch.setattr(ladder_mod, "_play_job", fake_play)
+    monkeypatch.setattr(ladder_mod.mp, "Pool", _SerialPool)
+
+    csv_path = tmp_path / "boss_ab_log.csv"
+    summ = ab_compare("winA", "winB", "bossX", n_seeds=5, n_workers=1,
+                      csv_path=str(csv_path), verbose=False)
+
+    # Independent rates: A wins s<3 (×2 sides)=6/10; B wins s<5 (×2)=10/10.
+    assert summ["a"]["n"] == 10 and summ["a"]["firsts"] == 6
+    assert summ["b"]["n"] == 10 and summ["b"]["firsts"] == 10
+    # Paired: s in {3,4} -> B wins, A loses (b_only); s in {0,1,2} -> both. (×2 sides)
+    p = summ["paired"]
+    assert p["both"] == 6 and p["b_only"] == 4 and p["a_only"] == 0 and p["neither"] == 0
+    assert p["discordant"] == 4
+    assert abs(p["sign_p"] - 0.125) < 1e-9
+    assert summ["faults"] == 0
+
+    # Ledger: one row per brain with the shared paired summary.
+    with open(csv_path) as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    assert {r["brain"] for r in rows} == {"winA", "winB"}
+    assert all(int(r["b_only"]) == 4 for r in rows)
+
+
+def test_ab_compare_excludes_and_counts_faults(monkeypatch):
+    # winA faults on every board (placement None); winB always wins.
+    def fake_play(job):
+        agent_spec, opp_spec, opp_name, tier, fmt, seed, side, npl = job
+        if agent_spec[1] == "winA":
+            return (opp_name, tier, fmt, None, npl)   # faulted
+        return (opp_name, tier, fmt, 1, npl)
+
+    monkeypatch.setattr(ladder_mod, "_play_job", fake_play)
+    monkeypatch.setattr(ladder_mod.mp, "Pool", _SerialPool)
+
+    summ = ab_compare("winA", "winB", "bossX", n_seeds=3, n_workers=1,
+                      csv_path=None, verbose=False)
+    assert summ["a"]["n"] == 0          # all of A's games excluded
+    assert summ["b"]["n"] == 6          # B played all 3 seeds × 2 sides
+    assert summ["faults"] == 6          # every paired board had a faulted side
+    assert summ["paired"]["discordant"] == 0
