@@ -22,6 +22,7 @@ from .roi_greedy_predict import plan_turn as roi_greedy_predict
 from .missions import plan_turn as missions
 from .roi_defense import plan_turn as roi_defense
 from .roi_ledger import plan_turn as roi_ledger
+from .lookahead import plan_turn as lookahead
 
 # name -> plan_turn callable. The Kaggle entry point and the eval sweep both
 # select brains by these names.
@@ -31,6 +32,7 @@ REGISTRY: Dict[str, Callable] = {
     "missions": missions,
     "roi_defense": roi_defense,
     "roi_ledger": roi_ledger,
+    "lookahead": lookahead,
 }
 
 # The brain `src/agent.py` submits unless told otherwise (our current best).
