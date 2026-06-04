@@ -25,6 +25,7 @@ Public API:
 from __future__ import annotations
 
 import csv
+import math
 import multiprocessing as mp
 import time
 from datetime import datetime
@@ -221,3 +222,132 @@ def evaluate_ladder(
         "rows": rows,
         "elapsed_s": elapsed,
     }
+
+
+# ---------------------------------------------------------------------------
+# Paired head-to-head A/B vs a single opponent (e.g. the Boss). Two brains face
+# the SAME (seed, side) boards, so we get both independent Wilson CIs AND a
+# paired (McNemar-style) comparison — far more sensitive for close rates.
+# ---------------------------------------------------------------------------
+
+
+def _sign_test_p(wins: int, n: int) -> float:
+    """Two-sided exact binomial sign test p-value for `wins` successes in `n`
+    discordant trials under H0 p=0.5. n=0 -> 1.0 (no evidence)."""
+    if n <= 0:
+        return 1.0
+    k = max(wins, n - wins)
+    tail = sum(math.comb(n, i) for i in range(k, n + 1))
+    return min(1.0, 2.0 * tail * (0.5 ** n))
+
+
+def ab_compare(
+    brain_a: str,
+    brain_b: str,
+    opponent: Agent,
+    n_seeds: int = 30,
+    n_workers: int = 8,
+    csv_path: Optional[str] = "boss_ab_log.csv",
+    verbose: bool = True,
+) -> dict:
+    """Paired 1v1 A/B of two registry brains vs `opponent`, both sides.
+
+    Both brains play the identical (seed, side) board set, so results pair up:
+    per board we record whether each brain placed 1st, then report each brain's
+    1st-rate + Wilson CI (independent) and the paired split (a-only / b-only /
+    both / neither) with a two-sided sign-test p on the discordant pairs.
+    """
+    opp_name = (opponent if isinstance(opponent, str) and "/" not in opponent
+                else Path(str(opponent)).stem)
+    opp_spec = ("agent", opponent)
+
+    keys: List[tuple] = []
+    jobs: List[tuple] = []
+    for s in range(n_seeds):
+        seed = _SEED_BASE + s
+        for side in (0, 1):
+            for tag, brain in (("a", brain_a), ("b", brain_b)):
+                keys.append((s, side, tag))
+                jobs.append(
+                    (("brain", brain), opp_spec, opp_name, "boss", "1v1", seed, side, 2)
+                )
+
+    if verbose:
+        print(f"\n=== A/B vs {opp_name}: '{brain_a}' (a) vs '{brain_b}' (b) ===")
+        print(f"  {len(jobs)} games ({n_seeds} seeds × 2 sides × 2 brains, paired)")
+
+    t0 = time.time()
+    results: Dict[tuple, tuple] = {}
+    with mp.Pool(processes=n_workers) as pool:
+        for key, res in zip(keys, pool.imap(_play_job, jobs)):  # imap = ordered
+            results[key] = res  # res = (opp, tier, fmt, placement, num_players)
+    elapsed = time.time() - t0
+
+    a_out: List[Tuple[int, int]] = []
+    b_out: List[Tuple[int, int]] = []
+    a_only = b_only = both = neither = faults = 0
+    for s in range(n_seeds):
+        for side in (0, 1):
+            ra, rb = results[(s, side, "a")], results[(s, side, "b")]
+            pa, pb = ra[3], rb[3]
+            if pa is not None:
+                a_out.append((pa, ra[4]))
+            if pb is not None:
+                b_out.append((pb, rb[4]))
+            if pa is None or pb is None:
+                faults += 1
+                continue
+            aw, bw = (pa == 1), (pb == 1)
+            if aw and not bw:
+                a_only += 1
+            elif bw and not aw:
+                b_only += 1
+            elif aw and bw:
+                both += 1
+            else:
+                neither += 1
+
+    agg_a = aggregate_outcomes(a_out)
+    agg_b = aggregate_outcomes(b_out)
+    discordant = a_only + b_only
+    sign_p = _sign_test_p(a_only, discordant)
+
+    summary = {
+        "opponent": opp_name,
+        "brain_a": brain_a, "brain_b": brain_b,
+        "a": agg_a, "b": agg_b,
+        "paired": {"a_only": a_only, "b_only": b_only, "both": both,
+                   "neither": neither, "discordant": discordant, "sign_p": sign_p},
+        "faults": faults, "elapsed_s": elapsed,
+    }
+
+    if verbose:
+        print(f"  [a] {brain_a:<18} 1st {agg_a['first_rate']*100:5.1f}% "
+              f"[{agg_a['ci_lo']*100:4.1f}–{agg_a['ci_hi']*100:4.1f}] (n={agg_a['n']})")
+        print(f"  [b] {brain_b:<18} 1st {agg_b['first_rate']*100:5.1f}% "
+              f"[{agg_b['ci_lo']*100:4.1f}–{agg_b['ci_hi']*100:4.1f}] (n={agg_b['n']})")
+        print(f"  paired: a-only={a_only} b-only={b_only} both={both} neither={neither} "
+              f"| sign p={sign_p:.3f}  faults={faults}  (in {elapsed:.0f}s)")
+
+    if csv_path is not None:
+        ts = datetime.now().isoformat(timespec="seconds")
+        path = Path(csv_path)
+        write_header = not path.exists()
+        fields = ["timestamp", "opponent", "brain", "n", "first_rate", "ci_lo",
+                  "ci_hi", "a_only", "b_only", "both", "neither", "sign_p"]
+        with open(path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            if write_header:
+                w.writeheader()
+            for tag, brain, agg in (("a", brain_a, agg_a), ("b", brain_b, agg_b)):
+                w.writerow({
+                    "timestamp": ts, "opponent": opp_name, "brain": brain,
+                    "n": agg["n"], "first_rate": round(agg["first_rate"], 4),
+                    "ci_lo": round(agg["ci_lo"], 4), "ci_hi": round(agg["ci_hi"], 4),
+                    "a_only": a_only, "b_only": b_only, "both": both,
+                    "neither": neither, "sign_p": round(sign_p, 4),
+                })
+        if verbose:
+            print(f"  ledger updated: {path}")
+
+    return summary

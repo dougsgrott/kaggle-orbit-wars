@@ -40,4 +40,10 @@ REGISTRY: Dict[str, Callable] = {
 # Promoted to roi_greedy_predict after AG4: motion-aware aim beat v0 on every
 # ladder opponent with non-overlapping Wilson CIs (overall 99.1% vs 78.6%;
 # vs `starter` 93.8% vs 18.8%). See wiki/measured_log.md.
-DEFAULT = "roi_greedy_predict"
+# Promoted to lookahead after AG8/M3b: greedy K-turn lookahead over the
+# WorldModel beat roi_greedy_predict vs the Boss in a paired n=60 A/B — boss 1st
+# 41.7% vs 20.0%, paired sign-test p=0.002 (the pre-registered promotion bar).
+# NOTE: lookahead depends on kaggle_environments at runtime (via WorldModel), so
+# the Kaggle submission packaging is an open follow-up (see wiki/measured_log.md);
+# the last submitted build is submissions/submission_02/ (roi_greedy_predict).
+DEFAULT = "lookahead"
