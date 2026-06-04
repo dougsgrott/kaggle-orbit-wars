@@ -7,10 +7,11 @@ that does **not** import the solution package, so it always runs inside the
 Arena via its file path: `run_episode([brain, opponents.BOSS], ...)`.
 
 The **Ladder** (`LADDER`) is the tiered, graded yardstick the eval harness sweeps
-(see L1 / docs/issues/eval). Tiers go floor -> panel -> official -> boss ->
-snapshots so signal stays non-saturating: when a brain maxes out the panel, the
-Boss tier still discriminates. Builtin names ("random"/"starter") are resolved by
-the Official env; the rest are file paths.
+(see L1 / docs/issues/eval). Tiers go floor -> panel -> official -> boss -> strong
+-> snapshots so signal stays non-saturating: when a brain maxes out the panel, the
+Boss discriminates; when it beats the Boss, the **strong** tier (L2: higher-rated
+ported agents) still does. Builtin names ("random"/"starter") are resolved by the
+Official env; the rest are file paths.
 """
 
 from pathlib import Path
@@ -23,9 +24,15 @@ PRODUCTION_FIRST = str(OPPONENTS_DIR / "production_first.py")
 DEFENDER         = str(OPPONENTS_DIR / "defender.py")
 RANDOM_PLAY      = str(OPPONENTS_DIR / "random_play.py")
 
-# Boss tier: the strongest reference (ported robust_agent, catalogue 685.1) — a
-# realistic leaderboard stand-in at the top of the Ladder.
+# Boss tier: a strong reference (ported robust_agent, catalogue 685.1).
 BOSS = str(OPPONENTS_DIR / "boss.py")
+
+# Strong tier (L2): higher-rated ported agents *above* the Boss, so a lever has to
+# beat competent play — the Boss alone is now a soft field (lookahead beats it ~42%,
+# the real LB spans 800-2000). See docs/issues/eval/L2-stronger-ladder-tier.md.
+LB1200 = str(OPPONENTS_DIR / "lb1200.py")   # catalogue 815.9 (heuristic WorldModel)
+LB1224 = str(OPPONENTS_DIR / "lb1224.py")   # catalogue 727.5 (WorldModel + missions)
+STRONG = [LB1200, LB1224]
 
 # Official env builtins (resolved by name by kaggle_environments).
 RANDOM  = "random"
@@ -43,6 +50,7 @@ LADDER = {
     "panel": list(ALL),
     "official": [STARTER],
     "boss": [BOSS],
+    "strong": list(STRONG),
     "snapshots": [],
 }
 
