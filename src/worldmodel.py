@@ -153,15 +153,20 @@ def rollout(
             if pol is None:
                 actions.append([])
             else:
-                obs_i = _obs_for_player(cur, i)
+                obs_i = obs_for_player(cur, i)
                 actions.append(pol(obs_i) or [])
         cur = step(cur, actions)
     return cur
 
 
-def _obs_for_player(fstate: ForwardState, i: int):
+def obs_for_player(fstate: ForwardState, i: int):
     """A plain dict observation for player `i` — the shared board + that player's
-    id, as a brain's `plan_turn` expects. Used when rolling out with policies."""
+    id, as a brain's `plan_turn` expects.
+
+    Used when rolling out with policies, and by search brains (MCTS, AG9) that
+    need to generate candidate moves / query an opponent model from a *simulated*
+    state mid-tree, not just the live obs.
+    """
     board = fstate.state[0].observation
     return {
         "player": i,
@@ -173,6 +178,10 @@ def _obs_for_player(fstate: ForwardState, i: int):
         "comet_planet_ids": board.comet_planet_ids,
         "step": getattr(board, "step", 0),
     }
+
+
+# Back-compat private alias (older callers referenced the underscored name).
+_obs_for_player = obs_for_player
 
 
 def planets_of(fstate: ForwardState) -> list:
