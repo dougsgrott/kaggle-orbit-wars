@@ -53,6 +53,8 @@ OPPONENT_RATINGS: Dict[str, float] = {
     "panel": 500.0,
     "official": 700.0,
     "boss": 1000.0,
+    "strong": 1200.0,   # L2 ported agents (catalogue 727-816), above the Boss
+    "sota": 1500.0,     # The Producer benchmark (beats the Boss 6-0), top of the field
     "snapshots": 800.0,
 }
 

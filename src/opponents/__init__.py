@@ -34,6 +34,22 @@ LB1200 = str(OPPONENTS_DIR / "lb1200.py")   # catalogue 815.9 (heuristic WorldMo
 LB1224 = str(OPPONENTS_DIR / "lb1224.py")   # catalogue 727.5 (WorldModel + missions)
 STRONG = [LB1200, LB1224]
 
+# SOTA tier: a top public submission ("The Producer", slawekbiel), ported as a
+# benchmark yardstick *above* the strong tier. Pure greedy flow-diff planner;
+# measured to beat our Boss 6-0 by elimination. REQUIRES torch (the rest of the
+# ladder is stdlib), so it is excluded from LADDER by default and only added when
+# torch is importable (see HAVE_TORCH below). Benchmark-only — never submitted.
+PRODUCER = str(OPPONENTS_DIR / "producer.py")
+
+try:
+    import torch as _torch  # noqa: F401
+
+    HAVE_TORCH = True
+except Exception:  # pragma: no cover - torch absent
+    HAVE_TORCH = False
+
+SOTA = [PRODUCER] if HAVE_TORCH else []
+
 # Official env builtins (resolved by name by kaggle_environments).
 RANDOM  = "random"
 STARTER = "starter"
@@ -51,6 +67,7 @@ LADDER = {
     "official": [STARTER],
     "boss": [BOSS],
     "strong": list(STRONG),
+    "sota": list(SOTA),
     "snapshots": [],
 }
 
