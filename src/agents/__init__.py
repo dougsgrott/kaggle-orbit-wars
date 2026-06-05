@@ -24,6 +24,7 @@ from .roi_defense import plan_turn as roi_defense
 from .roi_ledger import plan_turn as roi_ledger
 from .lookahead import plan_turn as lookahead
 from .mcts import plan_turn as mcts
+from .mcts_om import plan_turn as mcts_om
 
 # name -> plan_turn callable. The Kaggle entry point and the eval sweep both
 # select brains by these names.
@@ -35,6 +36,7 @@ REGISTRY: Dict[str, Callable] = {
     "roi_ledger": roi_ledger,
     "lookahead": lookahead,
     "mcts": mcts,
+    "mcts_om": mcts_om,
 }
 
 # The brain `src/agent.py` submits unless told otherwise (our current best).
