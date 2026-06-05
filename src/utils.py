@@ -44,7 +44,7 @@ __all__ = [
     # aim solver
     "estimate_arrival", "estimate_arrival_frac", "travel_time",
     "arc_safe_angle", "search_safe_intercept",
-    "aim_with_prediction", "probe_ship_candidates",
+    "aim_with_prediction", "intercept_aim", "probe_ship_candidates",
     # combat
     "resolve_combat",
     "ships_needed_to_capture_simple",
@@ -518,6 +518,122 @@ def aim_with_prediction(sx: float, sy: float, sr: float,
     if fallback is not None:
         return fallback
 
+    return None
+
+
+# ── F2. Continuous-intercept aim (AG14) ───────────────────────────────────────
+# The Producer's aim, ported: a sub-turn continuous-fixed-point lead + a
+# byte-exact **swept-pair** first-contact verify. The difference from
+# `aim_with_prediction` is the verify: `_verify_shot_hits` checks the target's
+# *endpoint* position each integer turn, which approves near-misses on fast-orbiting
+# targets (measured ~4.8% of flow_value's fleets sail OOB/into the sun). The
+# swept-pair tests the fleet segment against the target's *moving* segment over the
+# step — the engine's actual rule — so it rejects those near-misses (we keep the
+# ships home) and the continuous lead finds better angles. Same signature as
+# `aim_with_prediction`, so it is a drop-in aimer (see `agents/flow_value_ia`).
+
+
+def _swept_point_circle_hit(ax: float, ay: float, bx: float, by: float,
+                            p0x: float, p0y: float, p1x: float, p1y: float,
+                            r: float) -> bool:
+    """True iff a point moving ``A→B`` contacts a circle of radius ``r`` whose
+    centre moves ``P0→P1`` over the same unit step (the engine swept-pair test)."""
+    d0x, d0y = ax - p0x, ay - p0y
+    dvx, dvy = (bx - ax) - (p1x - p0x), (by - ay) - (p1y - p0y)
+    a = dvx * dvx + dvy * dvy
+    c = d0x * d0x + d0y * d0y - r * r
+    if a < 1e-12:
+        return c <= 0.0
+    b = 2.0 * (d0x * dvx + d0y * dvy)
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return False
+    sq = math.sqrt(disc)
+    t1 = (-b - sq) / (2.0 * a)
+    t2 = (-b + sq) / (2.0 * a)
+    return t2 >= 0.0 and t1 <= 1.0
+
+
+def _verify_swept(sx: float, sy: float, sr: float,
+                  angle: float, turns: int, ships: int,
+                  target_id: int, tx: float, ty: float, tr: float,
+                  initial_by_id: dict, angular_velocity: float,
+                  comets: list, comet_ids: set) -> bool:
+    """Swept-pair forward verify: True iff the fleet contacts the *moving* target
+    before going out of bounds or grazing the sun. Planet contact resolves before
+    env removal in a step, so target contact is checked first (engine rule)."""
+    speed = fleet_speed(max(1, ships))
+    fx, fy = launch_point(sx, sy, sr, angle)
+    vx, vy = math.cos(angle) * speed, math.sin(angle) * speed
+    window = _fwd_window(turns)
+    p_prev = predict_target_position(
+        target_id, tx, ty, tr, initial_by_id, angular_velocity, comets, comet_ids, 0)
+    if p_prev is None:
+        p_prev = (tx, ty)
+    for t in range(1, turns + window + 1):
+        pfx, pfy = fx, fy
+        fx += vx
+        fy += vy
+        p_now = predict_target_position(
+            target_id, tx, ty, tr, initial_by_id, angular_velocity, comets, comet_ids, t)
+        if p_now is not None:
+            if _swept_point_circle_hit(pfx, pfy, fx, fy,
+                                       p_prev[0], p_prev[1], p_now[0], p_now[1], tr):
+                return True  # contact wins the step
+            p_prev = p_now
+        if segment_hits_sun(pfx, pfy, fx, fy):
+            return False
+        if fx < 0.0 or fx > BOARD_SIZE or fy < 0.0 or fy > BOARD_SIZE:
+            return False
+    return False
+
+
+def _intercept_lead(sx: float, sy: float, sr: float,
+                    target_id: int, tx: float, ty: float, tr: float, ships: int,
+                    initial_by_id: dict, angular_velocity: float,
+                    comets: list, comet_ids: set,
+                    horizon: float = float(ROUTE_SEARCH_HORIZON),
+                    iters: int = 6):
+    """Continuous fixed-point intercept: solves ``t = (dist(target(t), src) − gap)
+    / speed`` (no grid scan) and aims at the target's position at ``t``. Returns
+    ``(angle, turns, px, py)``."""
+    speed = max(1e-6, fleet_speed(max(1, ships)))
+    gap = sr + LAUNCH_CLEARANCE + tr
+    t = max(0.0, (dist(sx, sy, tx, ty) - gap) / speed)
+    px, py = tx, ty
+    for _ in range(iters):
+        pos = predict_target_position(
+            target_id, tx, ty, tr, initial_by_id, angular_velocity, comets, comet_ids, t)
+        if pos is not None:
+            px, py = pos
+        t = max(0.0, min(float(horizon), (dist(sx, sy, px, py) - gap) / speed))
+    angle = math.atan2(py - sy, px - sx)
+    turns = max(1, int(math.ceil(t)))
+    return angle, turns, px, py
+
+
+def intercept_aim(sx: float, sy: float, sr: float,
+                  target_id: int, tx: float, ty: float, tr: float, ships: int,
+                  initial_by_id: dict, angular_velocity: float,
+                  comets: list, comet_ids: set,
+                  ) -> Optional[Tuple[float, int, float, float]]:
+    """Continuous-intercept solver (AG14). Drop-in for ``aim_with_prediction``:
+    same args, returns ``(angle, turns, px, py)`` or ``None``, every result
+    swept-pair verified."""
+    angle, turns, px, py = _intercept_lead(
+        sx, sy, sr, target_id, tx, ty, tr, ships,
+        initial_by_id, angular_velocity, comets, comet_ids)
+    if _verify_swept(sx, sy, sr, angle, turns, ships, target_id, tx, ty, tr,
+                     initial_by_id, angular_velocity, comets, comet_ids):
+        return angle, turns, px, py
+    # fall back to the iterative solver, but hold it to the same swept-pair verify.
+    res = _aim_raw(sx, sy, sr, target_id, tx, ty, tr, ships,
+                   initial_by_id, angular_velocity, comets, comet_ids)
+    if res is not None:
+        a, k, rpx, rpy = res
+        if _verify_swept(sx, sy, sr, a, k, ships, target_id, tx, ty, tr,
+                         initial_by_id, angular_velocity, comets, comet_ids):
+            return a, k, rpx, rpy
     return None
 
 
