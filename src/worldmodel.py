@@ -134,6 +134,26 @@ def step(fstate: ForwardState, actions_per_player: Sequence) -> ForwardState:
     return nxt
 
 
+def advance_inplace(fstate: ForwardState, actions_per_player: Sequence) -> ForwardState:
+    """Advance one turn **in place** (mutates and returns `fstate`) — the fast path.
+
+    Identical physics to `step()` but **without the per-step deep copy**, so it is
+    only safe on a state you exclusively own (a fresh `from_obs`, or a single
+    `copy.deepcopy` fork). Search brains that roll a long do-nothing/forward chain
+    fork **once** then call this N times, turning an O(N) deep-copy cost (which
+    explodes on heavy late-game boards) into O(1). Never call it on a shared state.
+    """
+    from kaggle_environments.envs.orbit_wars.orbit_wars import interpreter
+
+    next_step = int(getattr(fstate.state[0].observation, "step", 0)) + 1
+    for i, agent_state in enumerate(fstate.state):
+        agent_state.observation.step = next_step
+        act = actions_per_player[i] if i < len(actions_per_player) else []
+        agent_state.action = list(act) if act else []
+    interpreter(fstate.state, fstate.env)
+    return fstate
+
+
 def rollout(
     fstate: ForwardState,
     policies: Sequence[Optional[Callable]],

@@ -26,6 +26,7 @@ from .lookahead import plan_turn as lookahead
 from .mcts import plan_turn as mcts
 from .mcts_om import plan_turn as mcts_om
 from .producer_lite import plan_turn as roi_projected
+from .flow_value import plan_turn as flow_value
 
 # name -> plan_turn callable. The Kaggle entry point and the eval sweep both
 # select brains by these names.
@@ -39,6 +40,7 @@ REGISTRY: Dict[str, Callable] = {
     "mcts": mcts,
     "mcts_om": mcts_om,
     "roi_projected": roi_projected,
+    "flow_value": flow_value,
 }
 
 # The brain `src/agent.py` submits unless told otherwise (our current best).
@@ -49,7 +51,12 @@ REGISTRY: Dict[str, Callable] = {
 # Promoted to lookahead after AG8/M3b: greedy K-turn lookahead over the
 # WorldModel beat roi_greedy_predict vs the Boss in a paired n=60 A/B — boss 1st
 # 41.7% vs 20.0%, paired sign-test p=0.002 (the pre-registered promotion bar).
-# NOTE: lookahead depends on kaggle_environments at runtime (via WorldModel), so
-# the Kaggle submission packaging is an open follow-up (see wiki/measured_log.md);
-# the last submitted build is submissions/submission_02/ (roi_greedy_predict).
-DEFAULT = "lookahead"
+# Promoted to flow_value after AG13: the Producer's competitive flow-diff value
+# (Δnet_me − Σ_opp Δnet_opp over a do-nothing projection) crushed lookahead — 1v1
+# vs Boss 100% vs 25% (n=24, sign_p=0.000) AND 4P mean-place 1.12 vs 2.75 (n=8),
+# also beating lb1200/boss in 4P. First lever to close the 4P gap. Still loses to
+# the `sota` Producer benchmark (1v1 0-6), but is decisively our best brain.
+# Like lookahead, flow_value imports kaggle_environments at runtime (the WorldModel
+# projection), so it ships via the zip-bootstrap bundle (tools/build_submission_bundle.py);
+# see submissions/submission_04/. See wiki/measured_log.md.
+DEFAULT = "flow_value"

@@ -72,6 +72,44 @@ def garrison_projection(
     return traj
 
 
+def project_with_baseline(
+    obs,
+    H: int,
+    num_players: int = 2,
+    config: Optional[dict] = None,
+):
+    """One do-nothing rollout, reused for both sizing and the flow-diff baseline.
+
+    Returns ``(fstate0, traj, base_totals)``:
+      * ``fstate0`` — the un-stepped initial ``ForwardState`` (callers fork it with
+        ``worldmodel.step`` to score a hypothetical launch; ``step`` deep-copies, so
+        it is safe to reuse across candidates);
+      * ``traj`` — the do-nothing owner/ships trajectory (``garrison_projection``),
+        for ``capture_floor`` / ``safe_drain``;
+      * ``base_totals`` — per-player **total ships** (on owned planets + in owned
+        fleets) at horizon ``H`` under do-nothing = the flow-diff baseline a
+        candidate launch is scored against.
+    """
+    import copy
+
+    H = max(0, int(H))
+    n = int(num_players)
+    fstate0 = _wm.from_obs(obs, num_players=n, config=config)
+    # Fork once, then roll the do-nothing chain IN PLACE on the fork (so fstate0 is
+    # preserved for candidate forks and we pay one deep copy, not H).
+    cur = copy.deepcopy(fstate0)
+    traj: List[Snapshot] = [_snapshot(cur)]
+    noop = [[] for _ in range(n)]
+    for _ in range(H):
+        if getattr(cur.env, "done", False):
+            traj.append(traj[-1])
+            continue
+        _wm.advance_inplace(cur, noop)
+        traj.append(_snapshot(cur))
+    base_totals = _wm.score(cur)
+    return fstate0, traj, base_totals
+
+
 def defenders_at(traj: List[Snapshot], pid: int, k: int) -> Tuple[int, float]:
     """``(owner, ships)`` of planet ``pid`` at projected turn ``k`` (clamped)."""
     k = max(0, min(int(k), len(traj) - 1))
