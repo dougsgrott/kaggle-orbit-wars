@@ -11,5 +11,6 @@ dependencies = [
     "lizard>=1.22.2",
     "pipdeptree>=2.35.3",
     "pydeps>=3.0.6",
+    "pytest>=9.0.3",
     "radon>=6.0.1",
 ]
