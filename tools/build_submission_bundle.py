@@ -63,7 +63,7 @@ GENERATED — do not edit by hand. Self-contained Kaggle Orbit Wars submission
 
 This is the "option (A)" packaging: the agent imports kaggle_environments'
 interpreter at runtime (via src.worldmodel) to do greedy lookahead search.
-Bundled brain: {default}.
+Bundled brain: {brain_label}.
 """
 import base64
 import hashlib
@@ -97,7 +97,8 @@ _bootstrap()
 
 from src.agents import REGISTRY, DEFAULT  # noqa: E402
 
-_PLAN = REGISTRY[DEFAULT]
+_BRAIN = "{brain}" or DEFAULT
+_PLAN = REGISTRY[_BRAIN]
 
 
 def agent(obs, config=None):
@@ -105,21 +106,25 @@ def agent(obs, config=None):
 '''
 
 
-def build(out_path: Path) -> str:
+def build(out_path: Path, brain: str = "") -> str:
+    """Write the bundle. `brain` overrides which REGISTRY entry the agent runs
+    (empty = the package's DEFAULT) — so we can submit a brain for an LB read-out
+    without flipping DEFAULT off the locally-promoted champion."""
     b64 = base64.b64encode(_zip_src()).decode("ascii")
-    default = (SRC / "agents" / "__init__.py").read_text()
-    # surface which brain is bundled (best-effort, for the docstring only)
-    dflt = "lookahead" if 'DEFAULT = "lookahead"' in default else "DEFAULT"
-    text = _BOOTSTRAP.format(b64=b64, default=dflt)
+    brain_label = brain or "<DEFAULT>"
+    text = _BOOTSTRAP.format(b64=b64, brain=brain, brain_label=brain_label)
     out_path.write_text(text, encoding="utf-8")
     return text
 
 
-# Probe board (static) reused by the self-test.
+# Probe board (static) reused by the self-test. The neutral is close + productive
+# (prod 2) so a *value-based* brain (flow_value) judges the capture clearly worth
+# firing, not just a reachable-but-marginal target — while remaining a trivial
+# capture for the simpler brains too.
 _PROBE = (
     "{'player':0,"
-    "'planets':[[0,0,90.0,90.0,1.0,80,1],[1,-1,60.0,90.0,1.0,5,1]],"
-    "'fleets':[],'initial_planets':[[0,0,90.0,90.0,1.0,80,1],[1,-1,60.0,90.0,1.0,5,1]],"
+    "'planets':[[0,0,90.0,90.0,1.0,80,1],[1,-1,75.0,90.0,1.0,5,2]],"
+    "'fleets':[],'initial_planets':[[0,0,90.0,90.0,1.0,80,1],[1,-1,75.0,90.0,1.0,5,2]],"
     "'angular_velocity':0.0,'comets':[],'comet_planet_ids':[]}"
 )
 
@@ -162,11 +167,13 @@ def _self_test(out_path: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-o", "--out", default=str(REPO_ROOT / "submission.py"))
+    ap.add_argument("--brain", default="",
+                    help="REGISTRY brain to bundle (default: the package DEFAULT)")
     args = ap.parse_args()
     out_path = Path(args.out).resolve()
-    text = build(out_path)
+    text = build(out_path, brain=args.brain)
     _self_test(out_path)
-    print(f"wrote {out_path} ({len(text.encode()) // 1024} KiB)")
+    print(f"wrote {out_path} ({len(text.encode()) // 1024} KiB)  brain={args.brain or '<DEFAULT>'}")
 
 
 if __name__ == "__main__":
