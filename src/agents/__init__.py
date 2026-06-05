@@ -27,6 +27,7 @@ from .mcts import plan_turn as mcts
 from .mcts_om import plan_turn as mcts_om
 from .producer_lite import plan_turn as roi_projected
 from .flow_value import plan_turn as flow_value
+from .flow_value_ia import plan_turn as flow_value_ia
 
 # name -> plan_turn callable. The Kaggle entry point and the eval sweep both
 # select brains by these names.
@@ -41,6 +42,7 @@ REGISTRY: Dict[str, Callable] = {
     "mcts_om": mcts_om,
     "roi_projected": roi_projected,
     "flow_value": flow_value,
+    "flow_value_ia": flow_value_ia,
 }
 
 # The brain `src/agent.py` submits unless told otherwise (our current best).

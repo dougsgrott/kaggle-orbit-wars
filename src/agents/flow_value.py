@@ -87,9 +87,10 @@ def _candidate_value(fstate0, me, num_players, launch, base_totals, H) -> float:
     return float(d_me - d_opp)
 
 
-def plan_turn(obs, config=None) -> List[list]:
-    """Return this turn's Shots `[from_planet_id, angle, num_ships]`, ranked by the
-    competitive flow-diff value. See the module docstring."""
+def _plan(obs, config, aimer) -> List[list]:
+    """Core planner, parameterised by the `aimer` (signature of
+    `aim_with_prediction`). `plan_turn` uses the default aimer; the AG14 variant
+    `flow_value_ia` injects the continuous-intercept aimer. See the module docstring."""
     me = int(_field(obs, "player"))
     planets = _field(obs, "planets")
 
@@ -140,7 +141,7 @@ def plan_turn(obs, config=None) -> List[list]:
             # flow-diff value still suppresses wasteful sends (a launch to a target
             # the projection shows already becoming mine scores ~0).
             send = int(spendable)
-            aim = aim_with_prediction(sx, sy, sr, tid, tx, ty, tr, send, **world)
+            aim = aimer(sx, sy, sr, tid, tx, ty, tr, send, **world)
             if aim is None:
                 continue
             k = aim[1]
@@ -188,3 +189,9 @@ def plan_turn(obs, config=None) -> List[list]:
         budget[sid] -= send
         taken.add(tid)
     return moves
+
+
+def plan_turn(obs, config=None) -> List[list]:
+    """Return this turn's Shots `[from_planet_id, angle, num_ships]`, ranked by the
+    competitive flow-diff value (default motion-aware aimer). See the module docstring."""
+    return _plan(obs, config, aim_with_prediction)
