@@ -28,6 +28,8 @@ from .mcts_om import plan_turn as mcts_om
 from .producer_lite import plan_turn as roi_projected
 from .flow_value import plan_turn as flow_value
 from .flow_value_ia import plan_turn as flow_value_ia
+from .flow_value_def import plan_turn as flow_value_def
+from .flow_value_dr import plan_turn as flow_value_dr
 
 # name -> plan_turn callable. The Kaggle entry point and the eval sweep both
 # select brains by these names.
@@ -43,6 +45,8 @@ REGISTRY: Dict[str, Callable] = {
     "roi_projected": roi_projected,
     "flow_value": flow_value,
     "flow_value_ia": flow_value_ia,
+    "flow_value_def": flow_value_def,
+    "flow_value_dr": flow_value_dr,
 }
 
 # The brain `src/agent.py` submits unless told otherwise (our current best).
@@ -55,10 +59,12 @@ REGISTRY: Dict[str, Callable] = {
 # 41.7% vs 20.0%, paired sign-test p=0.002 (the pre-registered promotion bar).
 # Promoted to flow_value after AG13: the Producer's competitive flow-diff value
 # (Δnet_me − Σ_opp Δnet_opp over a do-nothing projection) crushed lookahead — 1v1
-# vs Boss 100% vs 25% (n=24, sign_p=0.000) AND 4P mean-place 1.12 vs 2.75 (n=8),
-# also beating lb1200/boss in 4P. First lever to close the 4P gap. Still loses to
-# the `sota` Producer benchmark (1v1 0-6), but is decisively our best brain.
-# Like lookahead, flow_value imports kaggle_environments at runtime (the WorldModel
-# projection), so it ships via the zip-bootstrap bundle (tools/build_submission_bundle.py);
-# see submissions/submission_04/. See wiki/measured_log.md.
-DEFAULT = "flow_value"
+# vs Boss 100% vs 25% (n=24, sign_p=0.000) AND 4P mean-place 1.12 vs 2.75 (n=8).
+# Submitted as sub_04 -> LB 956.1 (new best). (AG14 intercept aim: honest negative.)
+# Promoted to flow_value_def after AG15: flow_value + friendly-flip proactive defense
+# (owned planets the projection shows flipping become value-scored targets). Beat
+# flow_value 1v1 17-3 (n=20, sign_p=0.003) and 4P 1.80 vs 2.00; took the first games
+# off the `sota` Producer (1-5, was 0-6). (Regroup was an honest negative — dropped.)
+# Ships via the zip-bootstrap bundle (tools/build_submission_bundle.py --brain
+# flow_value_def); see submissions/submission_05/. See wiki/measured_log.md.
+DEFAULT = "flow_value_def"
