@@ -42,7 +42,7 @@ from typing import List
 
 from .. import worldmodel as _wm
 from ..garrison import capture_floor, project_with_baseline, safe_drain
-from ..utils import aim_with_prediction
+from ..utils import aim_with_prediction, fleet_speed
 from .roi_greedy import _field
 from .roi_greedy_predict import _build_world
 
@@ -50,6 +50,10 @@ from .roi_greedy_predict import _build_world
 H_DEFAULT = 14            # projection + scoring horizon (Producer uses 18/13)
 MAX_SOURCES = 8           # owned planets considered as launch sources (by safe_drain)
 MAX_TARGETS = 8           # non-owned planets considered as targets (by proximity)
+MAX_DEF_TARGETS = 4       # AG15: owned planets the projection shows flipping (by urgency)
+# --- AG15 regroup ---
+REGROUP_PRESSURE_MIN = 0.25   # only regroup toward a materially more-stressed planet
+MAX_REGROUP_TIME = 7.0        # a regroup fleet must arrive within this many turns
 CAPTURE_OVERHEAD = 1.0
 SCORE_THRESHOLD = 2.0     # fire only if marginal net ships over H exceeds this
 MIN_SPEND = 1
@@ -87,10 +91,87 @@ def _candidate_value(fstate0, me, num_players, launch, base_totals, H) -> float:
     return float(d_me - d_opp)
 
 
-def _plan(obs, config, aimer) -> List[list]:
-    """Core planner, parameterised by the `aimer` (signature of
-    `aim_with_prediction`). `plan_turn` uses the default aimer; the AG14 variant
-    `flow_value_ia` injects the continuous-intercept aimer. See the module docstring."""
+def _flip_targets(traj, my_planets, me, H):
+    """Owned planets the do-nothing projection shows flipping within H, ranked by
+    urgency ≈ projected ships lost (prod·(H−flip_turn) + garrison_now). [AG15]"""
+    K = min(int(H), len(traj) - 1)
+    out = []
+    for p in my_planets:
+        pid = int(p[0])
+        flip_turn = None
+        for k in range(1, K + 1):
+            if traj[k].get(pid, (-1, 0.0))[0] != me:
+                flip_turn = k
+                break
+        if flip_turn is not None:
+            urgency = float(p[6]) * (H - flip_turn) + float(p[5])
+            out.append((urgency, p))
+    out.sort(key=lambda z: -z[0])
+    return [p for _, p in out[:MAX_DEF_TARGETS]]
+
+
+def _enemy_pressure(planets, me, H):
+    """Per owned-planet reachable-enemy-mass proxy: Σ_enemy ships·(1−d/(speed·H))₊.
+    The regroup gradient — higher means more contested. [AG15]"""
+    enemies = [(float(p[2]), float(p[3]), float(p[5]))
+               for p in planets if int(p[1]) >= 0 and int(p[1]) != me]
+    pressure = {}
+    for p in planets:
+        if int(p[1]) != me:
+            continue
+        px, py = float(p[2]), float(p[3])
+        tot = 0.0
+        for ex, ey, esh in enemies:
+            reach = max(1e-6, fleet_speed(max(1.0, esh)) * float(H))
+            decay = 1.0 - _dist(px, py, ex, ey) / reach
+            if decay > 0.0:
+                tot += esh * decay
+        pressure[int(p[0])] = tot
+    return pressure
+
+
+def _regroup(planets, me, H, traj, leftover, world, aimer):
+    """Move leftover ships up the enemy-pressure gradient toward a materially more
+    stressed owned planet that is still mine at the fleet's arrival turn. [AG15]"""
+    pressure = _enemy_pressure(planets, me, H)
+    owned = {int(p[0]): p for p in planets if int(p[1]) == me}
+    H_axis = len(traj) - 1
+    moves = []
+    taken_dst = set()
+    for sid, spare in sorted(leftover.items(), key=lambda z: -z[1]):
+        if spare < MIN_SPEND:
+            continue
+        s = owned.get(sid)
+        if s is None:
+            continue
+        sx, sy, sr = float(s[2]), float(s[3]), float(s[4])
+        sp = pressure.get(sid, 0.0)
+        best = None  # (gap, did, angle, send)
+        for did, d in owned.items():
+            if did == sid or did in taken_dst:
+                continue
+            gap = pressure.get(did, 0.0) - sp
+            if gap <= REGROUP_PRESSURE_MIN:
+                continue
+            aim = aimer(sx, sy, sr, did, float(d[2]), float(d[3]), float(d[4]), int(spare), **world)
+            if aim is None or aim[1] > MAX_REGROUP_TIME:
+                continue
+            k = min(int(math.ceil(aim[1])), H_axis)
+            if traj[k].get(did, (-1, 0.0))[0] != me:  # must still be mine on arrival
+                continue
+            if best is None or gap > best[0]:
+                best = (gap, did, float(aim[0]), int(spare))
+        if best is not None:
+            _, did, angle, send = best
+            moves.append([sid, angle, send])
+            taken_dst.add(did)
+    return moves
+
+
+def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False) -> List[list]:
+    """Core planner, parameterised by the `aimer` and the AG15 levers. `plan_turn`
+    runs the AG13 baseline (both levers off); variants flip them on. See the module
+    docstring."""
     me = int(_field(obs, "player"))
     planets = _field(obs, "planets")
 
@@ -103,15 +184,11 @@ def _plan(obs, config, aimer) -> List[list]:
     my_planets = [p for p in planets if int(p[1]) == me]
     if not my_planets:
         return []
-    targets_all = [p for p in planets if int(p[1]) != me]
-    if not targets_all:
-        return []
 
     # --- shortlist: top sources by safe_drain, top targets by proximity --------
     sized_sources = []
     for s in my_planets:
-        sid = int(s[0])
-        spend = int(safe_drain(traj, sid, me, H))
+        spend = int(safe_drain(traj, int(s[0]), me, H))
         if spend >= MIN_SPEND:
             sized_sources.append((spend, s))
     if not sized_sources:
@@ -123,75 +200,94 @@ def _plan(obs, config, aimer) -> List[list]:
         tx, ty = float(t[2]), float(t[3])
         return min(_dist(float(s[2]), float(s[3]), tx, ty) for _, s in sources)
 
-    targets = sorted(targets_all, key=_proximity)[:MAX_TARGETS]
+    attack = sorted((p for p in planets if int(p[1]) != me), key=_proximity)[:MAX_TARGETS]
+    # AG15: owned planets projected to flip become *defensive* targets (the flow-diff
+    # value rewards holding them — kept production + denied to the enemy).
+    defense = _flip_targets(traj, my_planets, me, H) if enable_defense else []
+    targets = [(t, False) for t in attack] + [(t, True) for t in defense]
+    if not targets:
+        return []
 
-    # --- build candidates (size by capture_floor; re-aim with the real send) ---
-    cands = []  # (priority, src_pid, tgt_pid, angle, send)
+    # --- build candidates (size = full safe_drain; gate on capture_floor) ------
+    cands = []  # (priority, src_pid, tgt_pid, angle, send, is_def)
     for spendable, s in sources:
         sid = int(s[0])
         sx, sy, sr = float(s[2]), float(s[3]), float(s[4])
-        for t in targets:
+        for t, is_def in targets:
             tid = int(t[0])
             if tid == sid:
                 continue
-            tx, ty, tr = float(t[2]), float(t[3]), float(t[4])
-            # Size = the source's full safe_drain (the Producer's rule): a capture
-            # becomes a forward base with surplus, which is what keeps the agent
-            # expanding instead of stalling once the first ring is taken. The
-            # flow-diff value still suppresses wasteful sends (a launch to a target
-            # the projection shows already becoming mine scores ~0).
             send = int(spendable)
-            aim = aimer(sx, sy, sr, tid, tx, ty, tr, send, **world)
+            aim = aimer(sx, sy, sr, tid, float(t[2]), float(t[3]), float(t[4]), send, **world)
             if aim is None:
                 continue
             k = aim[1]
             need = capture_floor(traj, tid, me, k, overhead=CAPTURE_OVERHEAD)
             if send < need or send < MIN_SPEND:
-                continue  # can't clear the projected defenders at arrival
-            # cheap priority so the most promising are scored first under the guard.
+                continue
             prio = float(t[6]) / max(1, need) / max(1, k)
-            cands.append((prio, sid, tid, float(aim[0]), send))
+            cands.append((prio, sid, tid, float(aim[0]), send, is_def))
 
     if not cands:
         return []
     cands.sort(key=lambda z: -z[0])
 
-    # --- score by the flow-diff value -----------------------------------------
-    # cands is priority-sorted. Score the top MIN_SCORED unconditionally (never pass
-    # silently — the earlier guard's failure mode), then keep going until the soft
-    # budget; but stop at the HARD budget regardless (always scoring at least one),
-    # so a heavy/comet turn can't balloon far past the 1 s soft actTimeout. On normal
-    # boards every candidate scores well within budget.
+    # --- score by the flow-diff value (MIN_SCORED floor + hard budget cap) -----
     t0 = time.monotonic()
     soft = t0 + PER_TURN_BUDGET_S
     hard = t0 + HARD_BUDGET_S
-    scored = []  # (value, src_pid, tgt_pid, angle, send)
-    for i, (prio, sid, tid, angle, send) in enumerate(cands):
+    scored = []  # (value, src_pid, tgt_pid, angle, send, is_def)
+    for i, (prio, sid, tid, angle, send, is_def) in enumerate(cands):
         now = time.monotonic()
         if i >= 1 and now > hard:
             break
         if i >= MIN_SCORED and now > soft:
             break
         val = _candidate_value(fstate0, me, num_players, [sid, angle, send], base_totals, H)
-        scored.append((val, sid, tid, angle, send))
+        scored.append((val, sid, tid, angle, send, is_def))
 
     # --- greedy: best-first, one fleet per target, source-budget aware ---------
+    # Role mutex (AG15): a reinforced planet can't also be a source, and a planet
+    # drained as a source can't be reinforced this turn.
     scored.sort(key=lambda z: -z[0])
-    budget = {int(p[0]): int(p[5]) for p in my_planets}
+    orig = {int(p[0]): int(p[5]) for p in my_planets}
+    budget = dict(orig)
     taken = set()
+    reinforced = set()
+    used_src = set()
     moves: List[list] = []
-    for val, sid, tid, angle, send in scored:
+    for val, sid, tid, angle, send, is_def in scored:
         if val <= SCORE_THRESHOLD:
-            break  # sorted desc — the rest are no better
+            break
         if tid in taken or budget.get(sid, 0) < send:
+            continue
+        if sid in reinforced or (is_def and tid in used_src):
             continue
         moves.append([sid, angle, int(send)])
         budget[sid] -= send
         taken.add(tid)
+        used_src.add(sid)
+        if is_def:
+            reinforced.add(tid)
+
+    # --- AG15 regroup: marshal leftover ships up the pressure gradient ---------
+    if enable_regroup:
+        leftover = {}
+        for spend, s in sources:
+            sid = int(s[0])
+            if sid in reinforced:
+                continue
+            committed = orig.get(sid, 0) - budget.get(sid, 0)
+            spare = int(spend) - committed
+            if spare >= MIN_SPEND:
+                leftover[sid] = spare
+        if leftover:
+            moves.extend(_regroup(planets, me, H, traj, leftover, world, aimer))
+
     return moves
 
 
 def plan_turn(obs, config=None) -> List[list]:
     """Return this turn's Shots `[from_planet_id, angle, num_ships]`, ranked by the
-    competitive flow-diff value (default motion-aware aimer). See the module docstring."""
+    competitive flow-diff value (AG13 baseline: no defense/regroup). See docstring."""
     return _plan(obs, config, aim_with_prediction)
