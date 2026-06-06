@@ -91,7 +91,7 @@ def _candidate_value(fstate0, me, num_players, launch, base_totals, H) -> float:
     return float(d_me - d_opp)
 
 
-def _flip_targets(traj, my_planets, me, H):
+def _flip_targets(traj, my_planets, me, H, max_def=MAX_DEF_TARGETS):
     """Owned planets the do-nothing projection shows flipping within H, ranked by
     urgency ≈ projected ships lost (prod·(H−flip_turn) + garrison_now). [AG15]"""
     K = min(int(H), len(traj) - 1)
@@ -107,7 +107,7 @@ def _flip_targets(traj, my_planets, me, H):
             urgency = float(p[6]) * (H - flip_turn) + float(p[5])
             out.append((urgency, p))
     out.sort(key=lambda z: -z[0])
-    return [p for _, p in out[:MAX_DEF_TARGETS]]
+    return [p for _, p in out[:max_def]]
 
 
 def _enemy_pressure(planets, me, H):
@@ -168,15 +168,27 @@ def _regroup(planets, me, H, traj, leftover, world, aimer):
     return moves
 
 
-def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False) -> List[list]:
+def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
+          H=None, max_sources=None, max_targets=None, max_def=None,
+          threshold=None, min_spend=None) -> List[list]:
     """Core planner, parameterised by the `aimer` and the AG15 levers. `plan_turn`
-    runs the AG13 baseline (both levers off); variants flip them on. See the module
-    docstring."""
+    runs the AG13 baseline (both levers off); variants flip them on.
+
+    The five tuning knobs (`H`, `max_sources`, `max_targets`, `max_def`,
+    `threshold`, `min_spend`) default to the module constants — so `flow_value` /
+    `flow_value_def` behaviour is unchanged. They are exposed only so the ablation
+    brains in [flow_value_abl.py] can step the planner toward the Producer's tuned
+    config and measure the gap (see wiki/producer_diff.md). See the module docstring."""
     me = int(_field(obs, "player"))
     planets = _field(obs, "planets")
 
     num_players = max(2, max((int(p[1]) for p in planets), default=0) + 1)
-    H = H_DEFAULT
+    H = H_DEFAULT if H is None else int(H)
+    max_sources = MAX_SOURCES if max_sources is None else int(max_sources)
+    max_targets = MAX_TARGETS if max_targets is None else int(max_targets)
+    max_def = MAX_DEF_TARGETS if max_def is None else int(max_def)
+    threshold = SCORE_THRESHOLD if threshold is None else float(threshold)
+    min_spend = MIN_SPEND if min_spend is None else int(min_spend)
     world = _build_world(obs)
     cfg = config if isinstance(config, dict) else None
     fstate0, traj, base_totals = project_with_baseline(obs, H, num_players=num_players, config=cfg)
@@ -189,21 +201,21 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False) -> 
     sized_sources = []
     for s in my_planets:
         spend = int(safe_drain(traj, int(s[0]), me, H))
-        if spend >= MIN_SPEND:
+        if spend >= min_spend:
             sized_sources.append((spend, s))
     if not sized_sources:
         return []
     sized_sources.sort(key=lambda z: -z[0])
-    sources = sized_sources[:MAX_SOURCES]
+    sources = sized_sources[:max_sources]
 
     def _proximity(t):
         tx, ty = float(t[2]), float(t[3])
         return min(_dist(float(s[2]), float(s[3]), tx, ty) for _, s in sources)
 
-    attack = sorted((p for p in planets if int(p[1]) != me), key=_proximity)[:MAX_TARGETS]
+    attack = sorted((p for p in planets if int(p[1]) != me), key=_proximity)[:max_targets]
     # AG15: owned planets projected to flip become *defensive* targets (the flow-diff
     # value rewards holding them — kept production + denied to the enemy).
-    defense = _flip_targets(traj, my_planets, me, H) if enable_defense else []
+    defense = _flip_targets(traj, my_planets, me, H, max_def) if enable_defense else []
     targets = [(t, False) for t in attack] + [(t, True) for t in defense]
     if not targets:
         return []
@@ -223,7 +235,7 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False) -> 
                 continue
             k = aim[1]
             need = capture_floor(traj, tid, me, k, overhead=CAPTURE_OVERHEAD)
-            if send < need or send < MIN_SPEND:
+            if send < need or send < min_spend:
                 continue
             prio = float(t[6]) / max(1, need) / max(1, k)
             cands.append((prio, sid, tid, float(aim[0]), send, is_def))
@@ -257,7 +269,7 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False) -> 
     used_src = set()
     moves: List[list] = []
     for val, sid, tid, angle, send, is_def in scored:
-        if val <= SCORE_THRESHOLD:
+        if val <= threshold:
             break
         if tid in taken or budget.get(sid, 0) < send:
             continue
