@@ -30,6 +30,14 @@ from .flow_value import plan_turn as flow_value
 from .flow_value_ia import plan_turn as flow_value_ia
 from .flow_value_def import plan_turn as flow_value_def
 from .flow_value_dr import plan_turn as flow_value_dr
+from .flow_value_cfg import plan_turn as flow_value_cfg  # AG16: Producer per-format config
+# Ablation brains (experiment-only; never DEFAULT/submitted) — single steps from
+# flow_value_def toward the Producer's tuned config, for the gap attribution in
+# wiki/producer_diff.md.
+from .flow_value_abl import (
+    fv_abl_h, fv_abl_wide, fv_abl_thresh, fv_abl_minship,
+    fv_abl_aim, fv_abl_regroup, fv_abl_format, fv_abl_all,
+)
 
 # name -> plan_turn callable. The Kaggle entry point and the eval sweep both
 # select brains by these names.
@@ -47,6 +55,16 @@ REGISTRY: Dict[str, Callable] = {
     "flow_value_ia": flow_value_ia,
     "flow_value_def": flow_value_def,
     "flow_value_dr": flow_value_dr,
+    "flow_value_cfg": flow_value_cfg,
+    # experiment-only ablations (see wiki/producer_diff.md) — not for promotion.
+    "fv_abl_h": fv_abl_h,
+    "fv_abl_wide": fv_abl_wide,
+    "fv_abl_thresh": fv_abl_thresh,
+    "fv_abl_minship": fv_abl_minship,
+    "fv_abl_aim": fv_abl_aim,
+    "fv_abl_regroup": fv_abl_regroup,
+    "fv_abl_format": fv_abl_format,
+    "fv_abl_all": fv_abl_all,
 }
 
 # The brain `src/agent.py` submits unless told otherwise (our current best).
@@ -65,6 +83,13 @@ REGISTRY: Dict[str, Callable] = {
 # (owned planets the projection shows flipping become value-scored targets). Beat
 # flow_value 1v1 17-3 (n=20, sign_p=0.003) and 4P 1.80 vs 2.00; took the first games
 # off the `sota` Producer (1-5, was 0-6). (Regroup was an honest negative — dropped.)
-# Ships via the zip-bootstrap bundle (tools/build_submission_bundle.py --brain
-# flow_value_def); see submissions/submission_05/. See wiki/measured_log.md.
-DEFAULT = "flow_value_def"
+# Promoted to flow_value_cfg after AG16: the Producer's *tuned per-format config* (the
+# gap-attribution found our knobs were super-additive — flat one at a time, big as a
+# whole; see wiki/producer_diff.md). 2P H=18/4P H=13 + Producer shortlist widths,
+# threshold 1.5, min_ships 4, regroup on, intercept aim. No regression on any tier
+# (boss/strong ≥ def, mostly better); paired vs LB1200 cfg 100% vs def 85% (n=40,
+# 6-0, sign_p=0.031); vs the `sota` Producer 1v1 4.2%->12.5%, 4P mean-place 2.50->2.08
+# (n=12); bank-safe (90 ms late board). Ships via the zip-bootstrap bundle
+# (tools/build_submission_bundle.py --brain flow_value_cfg); see submissions/submission_06/.
+# See wiki/measured_log.md.
+DEFAULT = "flow_value_cfg"
