@@ -42,7 +42,7 @@ from typing import List
 
 from .. import worldmodel as _wm
 from ..garrison import capture_floor, project_with_baseline, safe_drain
-from ..utils import aim_with_prediction, fleet_speed
+from ..utils import aim_with_prediction, fleet_speed, intercept_aim_exact
 from .roi_greedy import _field
 from .roi_greedy_predict import _build_world
 
@@ -62,6 +62,11 @@ HARD_BUDGET_S = 0.85      # hard cap: stop scoring entirely (but always score >=
 #                           so even a heavy/comet turn stays near the 1 s soft limit.
 MIN_SCORED = 3            # always score this many top candidates (never pass silently),
 #                           but bounded by HARD_BUDGET_S so a slow board can't balloon.
+
+# Lightweight telemetry (last _plan call): candidates generated vs scored, elapsed,
+# whether the time caps truncated scoring. Used to ground the AG18 batched-value
+# question (does truncation actually bite in single-process play?). Harmless.
+_LAST_STATS: dict = {}
 
 
 def _dist(ax, ay, bx, by) -> float:
@@ -130,9 +135,12 @@ def _enemy_pressure(planets, me, H):
     return pressure
 
 
-def _regroup(planets, me, H, traj, leftover, world, aimer):
+def _regroup(planets, me, H, traj, leftover, aim_fn):
     """Move leftover ships up the enemy-pressure gradient toward a materially more
-    stressed owned planet that is still mine at the fleet's arrival turn. [AG15]"""
+    stressed owned planet that is still mine at the fleet's arrival turn. [AG15]
+
+    ``aim_fn(sx, sy, sr, tid, tx, ty, tr, ships)`` is the planner's chosen aimer
+    (predicted or byte-exact), already bound to its motion world."""
     pressure = _enemy_pressure(planets, me, H)
     owned = {int(p[0]): p for p in planets if int(p[1]) == me}
     H_axis = len(traj) - 1
@@ -153,7 +161,7 @@ def _regroup(planets, me, H, traj, leftover, world, aimer):
             gap = pressure.get(did, 0.0) - sp
             if gap <= REGROUP_PRESSURE_MIN:
                 continue
-            aim = aimer(sx, sy, sr, did, float(d[2]), float(d[3]), float(d[4]), int(spare), **world)
+            aim = aim_fn(sx, sy, sr, did, float(d[2]), float(d[3]), float(d[4]), int(spare))
             if aim is None or aim[1] > MAX_REGROUP_TIME:
                 continue
             k = min(int(math.ceil(aim[1])), H_axis)
@@ -169,8 +177,10 @@ def _regroup(planets, me, H, traj, leftover, world, aimer):
 
 
 def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
+          exact_aim=False,
           H=None, max_sources=None, max_targets=None, max_def=None,
-          threshold=None, min_spend=None) -> List[list]:
+          threshold=None, min_spend=None,
+          soft_budget=None, hard_budget=None) -> List[list]:
     """Core planner, parameterised by the `aimer` and the AG15 levers. `plan_turn`
     runs the AG13 baseline (both levers off); variants flip them on.
 
@@ -178,7 +188,11 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
     `threshold`, `min_spend`) default to the module constants — so `flow_value` /
     `flow_value_def` behaviour is unchanged. They are exposed only so the ablation
     brains in [flow_value_abl.py] can step the planner toward the Producer's tuned
-    config and measure the gap (see wiki/producer_diff.md). See the module docstring."""
+    config and measure the gap (see wiki/producer_diff.md).
+
+    `exact_aim` (AG17) ignores `aimer` and aims/verifies against the projection's
+    **byte-exact** per-turn positions (`traj_xy`) via `intercept_aim_exact` — no
+    orbit-prediction error. See the module docstring."""
     me = int(_field(obs, "player"))
     planets = _field(obs, "planets")
 
@@ -189,9 +203,23 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
     max_def = MAX_DEF_TARGETS if max_def is None else int(max_def)
     threshold = SCORE_THRESHOLD if threshold is None else float(threshold)
     min_spend = MIN_SPEND if min_spend is None else int(min_spend)
+    soft_budget = PER_TURN_BUDGET_S if soft_budget is None else float(soft_budget)
+    hard_budget = HARD_BUDGET_S if hard_budget is None else float(hard_budget)
     world = _build_world(obs)
     cfg = config if isinstance(config, dict) else None
-    fstate0, traj, base_totals = project_with_baseline(obs, H, num_players=num_players, config=cfg)
+    fstate0, traj, base_totals, traj_xy = project_with_baseline(
+        obs, H, num_players=num_players, config=cfg)
+
+    # Unified aim: byte-exact (AG17, reads traj_xy) or the passed motion aimer. Same
+    # `(angle, turns, px, py)|None` contract either way; tx/ty/tr are the target's
+    # current row (exact aim re-reads its trajectory from traj_xy, predicted aim leads
+    # from the current position + the obs motion world).
+    if exact_aim:
+        def do_aim(sx, sy, sr, tid, tx, ty, tr, send):
+            return intercept_aim_exact(sx, sy, sr, tid, tr, send, traj_xy, horizon=H)
+    else:
+        def do_aim(sx, sy, sr, tid, tx, ty, tr, send):
+            return aimer(sx, sy, sr, tid, tx, ty, tr, send, **world)
 
     my_planets = [p for p in planets if int(p[1]) == me]
     if not my_planets:
@@ -230,7 +258,7 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
             if tid == sid:
                 continue
             send = int(spendable)
-            aim = aimer(sx, sy, sr, tid, float(t[2]), float(t[3]), float(t[4]), send, **world)
+            aim = do_aim(sx, sy, sr, tid, float(t[2]), float(t[3]), float(t[4]), send)
             if aim is None:
                 continue
             k = aim[1]
@@ -246,8 +274,8 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
 
     # --- score by the flow-diff value (MIN_SCORED floor + hard budget cap) -----
     t0 = time.monotonic()
-    soft = t0 + PER_TURN_BUDGET_S
-    hard = t0 + HARD_BUDGET_S
+    soft = t0 + soft_budget
+    hard = t0 + hard_budget
     scored = []  # (value, src_pid, tgt_pid, angle, send, is_def)
     for i, (prio, sid, tid, angle, send, is_def) in enumerate(cands):
         now = time.monotonic()
@@ -257,6 +285,9 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
             break
         val = _candidate_value(fstate0, me, num_players, [sid, angle, send], base_totals, H)
         scored.append((val, sid, tid, angle, send, is_def))
+    _LAST_STATS.update(n_cands=len(cands), n_scored=len(scored),
+                       elapsed=time.monotonic() - t0,
+                       truncated=len(scored) < len(cands))
 
     # --- greedy: best-first, one fleet per target, source-budget aware ---------
     # Role mutex (AG15): a reinforced planet can't also be a source, and a planet
@@ -294,7 +325,7 @@ def _plan(obs, config, aimer, *, enable_defense=False, enable_regroup=False,
             if spare >= MIN_SPEND:
                 leftover[sid] = spare
         if leftover:
-            moves.extend(_regroup(planets, me, H, traj, leftover, world, aimer))
+            moves.extend(_regroup(planets, me, H, traj, leftover, do_aim))
 
     return moves
 
