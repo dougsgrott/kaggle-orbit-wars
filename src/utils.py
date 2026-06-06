@@ -44,7 +44,8 @@ __all__ = [
     # aim solver
     "estimate_arrival", "estimate_arrival_frac", "travel_time",
     "arc_safe_angle", "search_safe_intercept",
-    "aim_with_prediction", "intercept_aim", "probe_ship_candidates",
+    "aim_with_prediction", "intercept_aim", "intercept_aim_exact",
+    "probe_ship_candidates",
     # combat
     "resolve_combat",
     "ships_needed_to_capture_simple",
@@ -634,6 +635,123 @@ def intercept_aim(sx: float, sy: float, sr: float,
         if _verify_swept(sx, sy, sr, a, k, ships, target_id, tx, ty, tr,
                          initial_by_id, angular_velocity, comets, comet_ids):
             return a, k, rpx, rpy
+    return None
+
+
+# ── F2. Byte-exact aim (AG17) ─────────────────────────────────────────────────
+# The same continuous lead + swept-pair first-contact verify as `intercept_aim`,
+# but fed the **interpreter's own** per-turn positions (`traj_xy` from
+# src/garrison.py) instead of `predict_target_position`. AG14 localised the residual
+# misses to the prediction/engine orbit mismatch both aimers share; this removes it.
+
+def _interp_xy(traj_xy: list, pid: int, t: float):
+    """Target position at fractional turn ``t`` by linear interpolation of the
+    byte-exact per-turn snapshots — the engine resolves contact with linear motion
+    *within* a step, so this matches its collision model exactly. ``None`` if the
+    planet is absent at the bracketing turns."""
+    H = len(traj_xy) - 1
+    if H < 0:
+        return None
+    if t <= 0.0:
+        return traj_xy[0].get(pid)
+    if t >= H:
+        return traj_xy[H].get(pid)
+    k0 = int(t)
+    f = t - k0
+    p0 = traj_xy[k0].get(pid)
+    p1 = traj_xy[k0 + 1].get(pid)
+    if p0 is None or p1 is None:
+        return p0 if p1 is None else p1
+    return (p0[0] + (p1[0] - p0[0]) * f, p0[1] + (p1[1] - p0[1]) * f)
+
+
+def _verify_swept_pos(sx: float, sy: float, sr: float,
+                      angle: float, turns: int, ships: int, tr: float,
+                      pos_fn) -> bool:
+    """Swept-pair forward verify against a position oracle ``pos_fn(t)`` (turn ->
+    (x, y) or None). True iff the fleet contacts the moving target before the sun /
+    out-of-bounds. Mirrors `_verify_swept`, exact positions instead of prediction."""
+    speed = fleet_speed(max(1, ships))
+    fx, fy = launch_point(sx, sy, sr, angle)
+    vx, vy = math.cos(angle) * speed, math.sin(angle) * speed
+    window = _fwd_window(turns)
+    p_prev = pos_fn(0.0)
+    for t in range(1, turns + window + 1):
+        pfx, pfy = fx, fy
+        fx += vx
+        fy += vy
+        p_now = pos_fn(float(t))
+        if p_now is not None and p_prev is not None:
+            if _swept_point_circle_hit(pfx, pfy, fx, fy,
+                                       p_prev[0], p_prev[1], p_now[0], p_now[1], tr):
+                return True  # contact wins the step
+        if p_now is not None:
+            p_prev = p_now
+        if segment_hits_sun(pfx, pfy, fx, fy):
+            return False
+        if fx < 0.0 or fx > BOARD_SIZE or fy < 0.0 or fy > BOARD_SIZE:
+            return False
+    return False
+
+
+def _intercept_lead_pos(sx: float, sy: float, sr: float,
+                        tr: float, ships: int, pos_fn,
+                        horizon: float, iters: int = 6):
+    """Continuous fixed-point lead against a position oracle ``pos_fn(t)`` (no grid
+    scan). Returns ``(angle, turns, px, py)`` or ``None`` if the target is absent."""
+    speed = max(1e-6, fleet_speed(max(1, ships)))
+    gap = sr + LAUNCH_CLEARANCE + tr
+    p0 = pos_fn(0.0)
+    if p0 is None:
+        return None
+    px, py = p0
+    t = max(0.0, (dist(sx, sy, px, py) - gap) / speed)
+    for _ in range(iters):
+        pos = pos_fn(t)
+        if pos is not None:
+            px, py = pos
+        t = max(0.0, min(float(horizon), (dist(sx, sy, px, py) - gap) / speed))
+    angle = math.atan2(py - sy, px - sx)
+    turns = max(1, int(math.ceil(t)))
+    return angle, turns, px, py
+
+
+def intercept_aim_exact(sx: float, sy: float, sr: float,
+                        target_id: int, tr: float, ships: int,
+                        traj_xy: list, horizon: float = None
+                        ) -> Optional[Tuple[float, int, float, float]]:
+    """Byte-exact continuous-intercept aim (AG17). Leads + swept-pair verifies
+    against ``traj_xy`` (the interpreter's per-turn positions from the projection),
+    so there is no orbit-prediction error. Returns ``(angle, turns, px, py)`` (every
+    result verified) or ``None``. Same return contract as ``aim_with_prediction``."""
+    H = len(traj_xy) - 1
+    if H <= 0:
+        return None
+    hz = float(H) if horizon is None else float(horizon)
+
+    def pos(t):
+        return _interp_xy(traj_xy, target_id, t)
+
+    lead = _intercept_lead_pos(sx, sy, sr, tr, ships, pos, hz)
+    if lead is not None:
+        angle, turns, px, py = lead
+        if _verify_swept_pos(sx, sy, sr, angle, turns, ships, tr, pos):
+            return angle, turns, px, py
+
+    # Fallback: sweep integer arrival turns, aim straight at the exact position the
+    # target occupies at turn k, keep the first reachable + verified one.
+    speed = fleet_speed(max(1, ships))
+    gap = sr + LAUNCH_CLEARANCE + tr
+    for k in range(1, H + 1):
+        pk = traj_xy[k].get(target_id)
+        if pk is None:
+            continue
+        px, py = pk
+        if dist(sx, sy, px, py) - gap > speed * k:  # unreachable by turn k
+            continue
+        ang = math.atan2(py - sy, px - sx)
+        if _verify_swept_pos(sx, sy, sr, ang, k, ships, tr, pos):
+            return ang, k, px, py
     return None
 
 

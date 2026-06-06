@@ -44,6 +44,12 @@ def _snapshot(fstate) -> Snapshot:
     return {int(p[0]): (int(p[1]), float(p[5])) for p in _wm.planets_of(fstate)}
 
 
+def _snapshot_xy(fstate) -> Dict[int, Tuple[float, float]]:
+    """Planet id -> (x, y) for the current board of ``fstate`` — the **byte-exact**
+    engine orbit position (the interpreter stepped it), used for AG17 aiming."""
+    return {int(p[0]): (float(p[2]), float(p[3])) for p in _wm.planets_of(fstate)}
+
+
 def garrison_projection(
     obs,
     H: int,
@@ -80,7 +86,7 @@ def project_with_baseline(
 ):
     """One do-nothing rollout, reused for both sizing and the flow-diff baseline.
 
-    Returns ``(fstate0, traj, base_totals)``:
+    Returns ``(fstate0, traj, base_totals, traj_xy)``:
       * ``fstate0`` — the un-stepped initial ``ForwardState`` (callers fork it with
         ``worldmodel.step`` to score a hypothetical launch; ``step`` deep-copies, so
         it is safe to reuse across candidates);
@@ -89,6 +95,9 @@ def project_with_baseline(
       * ``base_totals`` — per-player **total ships** (on owned planets + in owned
         fleets) at horizon ``H`` under do-nothing = the flow-diff baseline a
         candidate launch is scored against.
+      * ``traj_xy`` — per-turn ``{pid: (x, y)}`` byte-exact orbit positions (AG17
+        aiming). Orbits are launch-independent, so these are exact for the real game
+        regardless of what we fire; recorded for free in the same rollout.
     """
     import copy
 
@@ -99,15 +108,18 @@ def project_with_baseline(
     # preserved for candidate forks and we pay one deep copy, not H).
     cur = copy.deepcopy(fstate0)
     traj: List[Snapshot] = [_snapshot(cur)]
+    traj_xy: List[Dict[int, Tuple[float, float]]] = [_snapshot_xy(cur)]
     noop = [[] for _ in range(n)]
     for _ in range(H):
         if getattr(cur.env, "done", False):
             traj.append(traj[-1])
+            traj_xy.append(traj_xy[-1])
             continue
         _wm.advance_inplace(cur, noop)
         traj.append(_snapshot(cur))
+        traj_xy.append(_snapshot_xy(cur))
     base_totals = _wm.score(cur)
-    return fstate0, traj, base_totals
+    return fstate0, traj, base_totals, traj_xy
 
 
 def defenders_at(traj: List[Snapshot], pid: int, k: int) -> Tuple[int, float]:

@@ -31,6 +31,8 @@ from .flow_value_ia import plan_turn as flow_value_ia
 from .flow_value_def import plan_turn as flow_value_def
 from .flow_value_dr import plan_turn as flow_value_dr
 from .flow_value_cfg import plan_turn as flow_value_cfg  # AG16: Producer per-format config
+from .flow_value_xa import plan_turn as flow_value_xa    # AG17: + byte-exact aim
+from .flow_value_fs import plan_turn as flow_value_fs    # AG18: + full-score (no truncation)
 # Ablation brains (experiment-only; never DEFAULT/submitted) — single steps from
 # flow_value_def toward the Producer's tuned config, for the gap attribution in
 # wiki/producer_diff.md.
@@ -56,6 +58,8 @@ REGISTRY: Dict[str, Callable] = {
     "flow_value_def": flow_value_def,
     "flow_value_dr": flow_value_dr,
     "flow_value_cfg": flow_value_cfg,
+    "flow_value_xa": flow_value_xa,
+    "flow_value_fs": flow_value_fs,
     # experiment-only ablations (see wiki/producer_diff.md) — not for promotion.
     "fv_abl_h": fv_abl_h,
     "fv_abl_wide": fv_abl_wide,
