@@ -62,7 +62,7 @@ def test_capture_scores_positive():
     obs = _obs(planets)
     H = _FV.H_DEFAULT
     world = _build_world(obs)
-    fstate0, traj, base = project_with_baseline(obs, H, num_players=2)
+    fstate0, traj, base, traj_xy = project_with_baseline(obs, H, num_players=2)
     aim = aim_with_prediction(25.0, 25.0, 2.0, 1, 40.0, 32.0, 2.0, 20, **world)
     assert aim is not None
     val = _FV._candidate_value(fstate0, 0, 2, [0, float(aim[0]), 20], base, H)
@@ -86,7 +86,7 @@ def test_redundant_launch_scores_near_zero():
     obs = _obs(planets)
     H = _FV.H_DEFAULT
     world = _build_world(obs)
-    fstate0, traj, base = project_with_baseline(obs, H, num_players=2)
+    fstate0, traj, base, traj_xy = project_with_baseline(obs, H, num_players=2)
     aim = aim_with_prediction(25.0, 25.0, 2.0, 1, 40.0, 32.0, 2.0, 10, **world)
     assert aim is not None
     val = _FV._candidate_value(fstate0, 0, 2, [0, float(aim[0]), 10], base, H)

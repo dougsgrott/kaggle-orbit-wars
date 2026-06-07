@@ -33,6 +33,7 @@ from .flow_value_dr import plan_turn as flow_value_dr
 from .flow_value_cfg import plan_turn as flow_value_cfg  # AG16: Producer per-format config
 from .flow_value_xa import plan_turn as flow_value_xa    # AG17: + byte-exact aim
 from .flow_value_fs import plan_turn as flow_value_fs    # AG18: + full-score (no truncation)
+from .producer_port import plan_turn as producer_port    # full Producer, vendored verbatim (champion base)
 # Ablation brains (experiment-only; never DEFAULT/submitted) — single steps from
 # flow_value_def toward the Producer's tuned config, for the gap attribution in
 # wiki/producer_diff.md.
@@ -60,6 +61,7 @@ REGISTRY: Dict[str, Callable] = {
     "flow_value_cfg": flow_value_cfg,
     "flow_value_xa": flow_value_xa,
     "flow_value_fs": flow_value_fs,
+    "producer_port": producer_port,
     # experiment-only ablations (see wiki/producer_diff.md) — not for promotion.
     "fv_abl_h": fv_abl_h,
     "fv_abl_wide": fv_abl_wide,
@@ -96,4 +98,11 @@ REGISTRY: Dict[str, Callable] = {
 # (n=12); bank-safe (90 ms late board). Ships via the zip-bootstrap bundle
 # (tools/build_submission_bundle.py --brain flow_value_cfg); see submissions/submission_06/.
 # See wiki/measured_log.md.
-DEFAULT = "flow_value_cfg"
+# Promoted to producer_port: the LB settled the strategy — sub_07 (the full, unmodified
+# Producer) = 1222 vs sub_06 (flow_value_cfg config-port) = 1080, and the loss diagnosis
+# found the gap diffuse (no single lever). So we vendored the WHOLE Producer verbatim
+# (vendor/orbit_lite/ + vendor/producer_runtime.py, slawekbiel — see vendor/NOTICE.md) as
+# the champion BASE, to be improved with genuine contributions on top. Battle-validated vs
+# the pristine original: 2P 24/48 = 50% (perfect mirror, n=48), 0 faults, 35 ms/turn. Ships
+# as a tar.gz (submissions/submission_08/, = sub_07's proven 1222 layout). See wiki/measured_log.md.
+DEFAULT = "producer_port"
