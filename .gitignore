@@ -15,6 +15,7 @@ clean_scripts/
 converted_scripts/
 docs/
 kaggle_notebooks/
+kaggle_discussions/
 wiki/
 submissions/
 CLAUDE.md
@@ -23,3 +24,6 @@ CONTEXT.md
 PLAN.md
 orbit_wars_catalogue.csv
 pipeline.py
+
+*.csv
+*.json

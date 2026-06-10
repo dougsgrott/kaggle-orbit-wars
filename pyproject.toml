@@ -6,11 +6,28 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "graphviz>=0.21",
+    "ipykernel>=7.2.0",
     "kaggle>=2.2.0",
     "kaggle-environments==1.29.3",
     "lizard>=1.22.2",
+    "networkx>=3.6.1",
     "pipdeptree>=2.35.3",
     "pydeps>=3.0.6",
     "pytest>=9.0.3",
     "radon>=6.0.1",
+    "scipy>=1.13",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "plotly>=6.8.0",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
