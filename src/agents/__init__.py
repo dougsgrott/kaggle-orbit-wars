@@ -34,6 +34,8 @@ from .flow_value_cfg import plan_turn as flow_value_cfg  # AG16: Producer per-fo
 from .flow_value_xa import plan_turn as flow_value_xa    # AG17: + byte-exact aim
 from .flow_value_fs import plan_turn as flow_value_fs    # AG18: + full-score (no truncation)
 from .producer_port import plan_turn as producer_port    # full Producer, vendored verbatim (champion base)
+from .producer_solver import plan_turn as producer_solver  # AG23: exact-solver turn allocation on top of the Producer
+from .producer_open import plan_turn as producer_open    # AG20: early-game position-building layer on top of the Producer
 # Ablation brains (experiment-only; never DEFAULT/submitted) — single steps from
 # flow_value_def toward the Producer's tuned config, for the gap attribution in
 # wiki/producer_diff.md.
@@ -62,6 +64,8 @@ REGISTRY: Dict[str, Callable] = {
     "flow_value_xa": flow_value_xa,
     "flow_value_fs": flow_value_fs,
     "producer_port": producer_port,
+    "producer_solver": producer_solver,  # AG23 Track B (off|measure|live via PRODUCER_SOLVER_MODE)
+    "producer_open": producer_open,       # AG20 early-game position layer (PRODUCER_OPEN_TERM/T/WEIGHT)
     # experiment-only ablations (see wiki/producer_diff.md) — not for promotion.
     "fv_abl_h": fv_abl_h,
     "fv_abl_wide": fv_abl_wide,
